@@ -53,14 +53,23 @@ class ConversationState:
     def update_from(self, text: str):
         """从用户文本提取约束条件。"""
         # 人数：支持阿拉伯数字和中文数字
+        people_num = 0
         m = re.search(r"(\d+)\s*个人?", text)
-        if m: self.people = int(m.group(1))
+        if m: people_num = int(m.group(1))
         elif re.search(r"[一二两三四五六七八九十]\s*个人", text):
-            self.people = _parse_int(text)
-        # 预算：支持"500元"、"预算500"、"预算500元"
+            people_num = _parse_int(text)
+        if people_num > 0: self.people = people_num
+        # 预算：多种表达方式
+        budget = 0
         m = re.search(r"预算\s*(\d+)", text)
-        if not m: m = re.search(r"(\d+)\s*元", text)
-        if m: self.budget = int(m.group(1))
+        if m: budget = int(m.group(1))
+        if not budget: m = re.search(r"(\d+)\s*[元块]", text)
+        if m: budget = int(m.group(1))
+        # "推荐300的菜" / "吃200的" / "点150的"
+        if not budget:
+            m = re.search(r"(?:推荐|吃|点|来)\s*(\d{2,})\s*的", text)
+            if m: budget = int(m.group(1))
+        if budget > 0: self.budget = budget
         for k in ["宝宝","小宝宝","婴儿","baby","儿童","小孩","孩子"]:
             if k in text: self.people_type = "儿童"; break
         for k in ["老人","长辈","爸妈","父母","爷爷","奶奶"]:
