@@ -72,18 +72,28 @@ def match_faq(query: str) -> Optional[str]:
             if dish_name in q or short_name in q:
                 return info
     
-    # 2. 关键词匹配
+    # 2. 关键词匹配（加权 + 短词上下文排除，防止"热菜"匹配"空调"）
+    _CONTEXT_EXCLUDES = {
+        "热": ["菜", "汤", "炒", "煮", "蒸", "灼", "饭", "面", "辣", "乎"],
+    }
     best_match = None
     best_score = 0
     for entry in faq:
         score = 0
         for kw in entry["keywords"]:
-            if kw.lower() in q:
-                score += len(kw)  # 长关键词权重更高
+            kw_lower = kw.lower()
+            if kw_lower in q:
+                # 上下文排除：如果短关键词后面紧跟菜品相关字，跳过
+                if kw_lower in _CONTEXT_EXCLUDES:
+                    idx = q.index(kw_lower)
+                    after = q[idx + len(kw_lower):idx + len(kw_lower) + 2]
+                    if any(c in after for c in _CONTEXT_EXCLUDES[kw_lower]):
+                        continue
+                score += len(kw_lower)
         if score > best_score:
             best_score = score
             best_match = entry
-    
+
     if best_match and best_score > 0:
         return best_match["answer"]
     

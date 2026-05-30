@@ -323,11 +323,13 @@ class RecommendAgent:
     def invoke(self, inp: str, state: ConversationState, is_follow: bool) -> str:
         if is_follow and state.last_dishes:
             return self._follow_up(inp, state)
+        # 人群+预算/人数组合 → _for_people（内部处理预算）
         if state.people_type:
             return self._for_people(state)
         if state.allergies:
             return self._allergen_safe(state)
-        if state.budget > 0 and state.people > 0:
+        if state.budget > 0:
+            if state.people == 0: state.people = 3  # 默认3人
             return self._by_budget(state)
         if state.scene:
             return self._by_scene(state)
@@ -371,6 +373,59 @@ class RecommendAgent:
             return self.chain.invoke({"input": f"推荐{state.people_type}吃的菜\n{ctx}"})
         recs = info.get("推荐", [])
         note = info.get("说明", "")
+
+        # 如果有预算/人数约束 → 在人群筛选基础上做预算搭配
+        if state.budget > 0:
+            # 将人群推荐的菜品名映射为实际 Dish 对象，再加上同类别菜品
+            people_dish_names = set(recs)
+            people_dishes = [d for n in recs if (d := self.kb.get_dish_by_name(n))]
+            people_tags = set()
+            for d in people_dishes:
+                people_tags.update(d.tags)
+
+            # 候选：人群推荐菜品 + 有相同标签的菜品
+            candidates = []
+            seen = set()
+            for d in self.kb.dishes:
+                if d.name in people_dish_names or d.tags & people_tags:
+                    if d.name not in seen:
+                        candidates.append(d)
+                        seen.add(d.name)
+            # 补充清淡菜品（老人/儿童/孕妇通常偏好清淡）
+            if not candidates:
+                candidates = [d for d in self.kb.dishes if "清淡" in d.tags]
+            if not candidates:
+                candidates = list(self.kb.dishes)
+
+            if state.people == 0: state.people = 3
+            meat_mains = [d for d in candidates if d.category == "招牌菜" or (d.category == "热菜" and "蔬菜" not in d.tags)]
+            veg_sides = [d for d in candidates if d.category in {"主食", "汤品", "甜品"} or (d.category == "热菜" and "蔬菜" in d.tags)]
+            drinks = [d for d in candidates if d.category == "饮品"]
+            combo, total = [], 0
+            for d in sorted(meat_mains, key=lambda d: d.price):
+                if total + d.price <= state.budget and len(combo) < state.people:
+                    combo.append(d); total += d.price
+            for d in sorted(veg_sides, key=lambda d: d.price):
+                if total + d.price <= state.budget and d not in combo:
+                    combo.append(d); total += d.price; break
+            if state.people >= 3:
+                remaining = [d for d in veg_sides if d not in combo]
+                for d in sorted(remaining, key=lambda d: d.price):
+                    if total + d.price <= state.budget:
+                        combo.append(d); total += d.price; break
+            for d in sorted(drinks, key=lambda d: d.price):
+                if total + d.price <= state.budget and d not in combo:
+                    combo.append(d); total += d.price; break
+
+            if combo:
+                lines = [f"**{d.name}** {d.price}元" for d in combo]
+                reply = f"给{state.people_type}推荐，{state.people}人{state.budget}元搭配：\n" + "\n".join(lines) + f"\n共{total}元，余{state.budget - total}元~"
+                if note: reply += f"\n({note})"
+                state.last_dishes = [d.name for d in combo]
+                state.last_reply = reply
+                return reply
+
+        # 无预算或预算不足 → 返回人群推荐
         dishes = [f"**{d.name}** {d.price}元 - {d.description[:30]}..."
                   for n in recs[:4] if (d := self.kb.get_dish_by_name(n))]
         state.last_dishes = recs[:4]
