@@ -243,8 +243,10 @@ class RecommendAgent:
         return reply
 
     def _by_budget(self, state):
-        pp = state.budget / state.people
+        # 套餐：价格必须在预算内
         for s in self.kb.suites:
+            if s["price"] > state.budget:
+                continue
             if (state.people <= 2 and "双人" in s["name"]) or \
                (3 <= state.people <= 4 and "四人" in s["name"]) or \
                (state.people == 1 and "一人" in s["name"]):
@@ -252,16 +254,48 @@ class RecommendAgent:
                 state.last_dishes = s["items"]
                 state.last_reply = reply
                 return reply
-        # 自由搭配
-        affordable = sorted(self.kb.dishes, key=lambda d: d.price)
+
+        # 口味约束筛选候选菜品
+        candidates = list(self.kb.dishes)
+        if state.taste == "清淡":
+            # 严格只选有"清淡"标签的菜品
+            candidates = [d for d in candidates if "清淡" in d.tags]
+
+        # 区分主菜和配菜（蔬菜热菜归为配菜，不算主菜）
+        meat_mains = [d for d in candidates if d.category == "招牌菜" or (d.category == "热菜" and "蔬菜" not in d.tags)]
+        veg_sides = [d for d in candidates if d.category in {"主食", "汤品", "甜品"} or (d.category == "热菜" and "蔬菜" in d.tags)]
+        drinks = [d for d in candidates if d.category == "饮品"]
         combo, total = [], 0
-        for d in affordable:
-            if total + d.price <= state.budget:
+
+        # 1. 主菜：尽量每人一道（优先便宜的）
+        for d in sorted(meat_mains, key=lambda d: d.price):
+            if total + d.price <= state.budget and len(combo) < state.people:
                 combo.append(d); total += d.price
-            if len(combo) >= state.people + 1: break
+
+        # 2. 至少一道蔬菜/汤/主食
+        for d in sorted(veg_sides, key=lambda d: d.price):
+            if total + d.price <= state.budget and d not in combo:
+                combo.append(d); total += d.price
+                break
+
+        # 3. 再加一道主食或汤（如果预算充足且人多）
+        remaining_sides = [d for d in veg_sides if d not in combo]
+        if state.people >= 3:
+            for d in sorted(remaining_sides, key=lambda d: d.price):
+                if total + d.price <= state.budget:
+                    combo.append(d); total += d.price
+                    break
+
+        # 4. 剩余预算加饮品
+        for d in sorted(drinks, key=lambda d: d.price):
+            if total + d.price <= state.budget and d not in combo:
+                combo.append(d); total += d.price
+                break
+
         if combo:
             lines = [f"**{d.name}** {d.price}元" for d in combo]
-            reply = f"{state.people}人{state.budget}元搭配：\n" + "\n".join(lines) + f"\n共{total}元，余{state.budget-total}元加饮品~"
+            label = f"（{state.taste}）" if state.taste else ""
+            reply = f"{state.people}人{state.budget}元{label}搭配：\n" + "\n".join(lines) + f"\n共{total}元，余{state.budget-total}元~"
             state.last_dishes = [d.name for d in combo]
             state.last_reply = reply
             return reply
@@ -305,21 +339,28 @@ class RecommendAgent:
     def _follow_up(self, inp, state):
         t = inp.lower()
         exclude = set(state.last_dishes)
+
+        # 口味约束更新（无论哪种follow-up模式都先检查）
+        if "清淡" in t: state.taste = "清淡"
+        if "不辣" in t or "不要辣" in t: state.taste = "不辣"
+
         if "换个" in t or "不要" in t or "换一个" in t:
-            if "清淡" in t: state.taste = "清淡"
-            if "不辣" in t or "不要辣" in t: state.taste = "不辣"
             cands = [d for d in self.kb.dishes if d.name not in exclude]
-            if state.taste == "清淡": cands = [d for d in cands if "清淡" in d.tags or "不辣" in d.spice]
+            if state.taste == "清淡": cands = [d for d in cands if "清淡" in d.tags]
             elif state.taste == "不辣": cands = [d for d in cands if "不辣" in d.spice]
             recs = cands[:3] or [d for d in self.kb.dishes if d.name not in exclude][:3]
             lines = [f"**{d.name}** {d.price}元" for d in recs]
             state.last_dishes = [d.name for d in recs]
             return "换个口味：\n" + "\n".join(lines)
-        if "还有" in t or "其他的" in t or "别的" in t:
-            cands = [d for d in self.kb.dishes if d.name not in exclude][:3] or self.kb.dishes[:3]
-            lines = [f"**{d.name}** {d.price}元" for d in cands]
-            state.last_dishes = [d.name for d in cands]
-            return "再来几道：\n" + "\n".join(lines)
+        if "还有" in t or "其他的" in t or "别的" in t or "再" in t:
+            cands = [d for d in self.kb.dishes if d.name not in exclude]
+            if state.taste == "清淡": cands = [d for d in cands if "清淡" in d.tags]
+            elif state.taste == "不辣": cands = [d for d in cands if "不辣" in d.spice]
+            recs = cands[:3] or self.kb.dishes[:3]
+            lines = [f"**{d.name}** {d.price}元" for d in recs]
+            state.last_dishes = [d.name for d in recs]
+            label = f"（{state.taste}）" if state.taste else ""
+            return f"再来几道{label}：\n" + "\n".join(lines)
         if "改成" in t:
             m = re.search(r"(\d+)\s*个人?", t)
             if m:

@@ -130,3 +130,70 @@ if passed == total:
 else:
     print(f"  {passed}/{total} passed, {total-passed} need attention")
 print("=" * 50)
+
+# 7. Matrix B - 推荐与约束能力
+print("\n[7] Matrix B - Recommendation constraints")
+for i, (q, kw) in enumerate([
+    ("孕妇吃什么比较合适", ["孕妇"]),
+    ("海鲜过敏推荐吃什么", ["海鲜"]),
+    ("我不吃辣推荐一下", ["辣"]),
+    ("3个人150元预算清淡一点", ["150"]),
+    ("一个人晚上吃点什么", ["一人"]),
+    ("推荐下饭的菜", ["下饭"]),
+    ("清蒸鲈鱼多少钱", ["68"]),
+]):
+    try:
+        r = post("/chat", {"message": q, "session_id": f"pf_mb{i}"})
+        ok = r.get("success") and any(k in r.get("reply","") for k in kw)
+        check(q, ok, r.get("reply","")[:60])
+    except Exception as e:
+        check(q, False, str(e))
+
+# 8. Matrix C - 多轮承接（扩展）
+print("\n[8] Matrix C - Multi-turn extended")
+sid = "pf_mc1"
+try:
+    r1 = post("/chat", {"message": "推荐小孩吃的菜", "session_id": sid})
+    r2 = post("/chat", {"message": "再来个清淡点的", "session_id": sid})
+    ok = r1.get("success") and r2.get("success") and r2.get("reply","") != r1.get("reply","")
+    check("kids -> light", ok, r2.get("reply","")[:60])
+except Exception as e:
+    check("kids -> light", False, str(e))
+
+sid2 = "pf_mc2"
+try:
+    r1 = post("/chat", {"message": "花生过敏推荐吃什么", "session_id": sid2})
+    r2 = post("/chat", {"message": "还有别的吗", "session_id": sid2})
+    ok = r1.get("success") and r2.get("success") and r2.get("reply","") != r1.get("reply","")
+    check("peanut allergy -> more", ok, r2.get("reply","")[:60])
+except Exception as e:
+    check("peanut allergy -> more", False, str(e))
+
+sid3 = "pf_mc3"
+try:
+    r1 = post("/chat", {"message": "我想订座", "session_id": sid3})
+    r2 = post("/chat", {"message": "明天晚上6个人", "session_id": sid3})
+    ok = r1.get("success") and r2.get("success") and "6" in r2.get("reply","")
+    check("reservation -> 6 people", ok, r2.get("reply","")[:60])
+except Exception as e:
+    check("reservation -> 6 people", False, str(e))
+
+# 9. Stability - 20 consecutive calls
+print("\n[9] Stability")
+fail_count = 0
+for i in range(20):
+    try:
+        r = post("/chat", {"message": "全部菜单", "session_id": f"pf_s{i}"})
+        if not r.get("success") or "菜单" not in r.get("reply",""):
+            fail_count += 1
+    except:
+        fail_count += 1
+check(f"20 consecutive calls ({20-fail_count}/20)", fail_count == 0)
+
+# summary
+print("\n" + "=" * 50)
+if passed == total:
+    print(f"  ALL PASS {passed}/{total} - Ready to demo!")
+else:
+    print(f"  {passed}/{total} passed, {total-passed} need attention")
+print("=" * 50)

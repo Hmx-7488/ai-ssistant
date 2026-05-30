@@ -78,12 +78,7 @@ class VectorStore:
 
     def add_documents(self, documents: List[Document]) -> None:
         """
-        把文档存入向量数据库
-
-        过程：
-        1. 提取每个文档的 page_content
-        2. 用 Embedding 模型把文字变成向量
-        3. 存入 ChromaDB
+        把文档存入向量数据库（分批添加，避免 Embedding API 批次大小限制）
 
         Args:
             documents: Document 列表
@@ -92,10 +87,14 @@ class VectorStore:
             self._safe_print("[VectorStore] 没有文档需要添加")
             return
 
-        self._safe_print(f"[VectorStore] 正在添加 {len(documents)} 个文档...")
+        batch_size = 10
+        total = len(documents)
+        self._safe_print(f"[VectorStore] 正在添加 {total} 个文档（每批 {batch_size}）...")
 
-        # ChromaDB 会自动调用 Embedding 模型把文字变成向量
-        self.vector_store.add_documents(documents)
+        for i in range(0, total, batch_size):
+            batch = documents[i:i + batch_size]
+            self.vector_store.add_documents(batch)
+            self._safe_print(f"  已添加 {min(i + batch_size, total)}/{total}")
 
         self._safe_print(f"[VectorStore] 添加完成！")
 
