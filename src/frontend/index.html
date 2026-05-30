@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>饭小二 - 餐饮AI客服</title>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);height:100vh;display:flex;justify-content:center;align-items:center}
+        .chat-container{width:92%;max-width:520px;height:85vh;background:#fff;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,.3);display:flex;flex-direction:column;overflow:hidden}
+        .chat-header{background:linear-gradient(90deg,#ff6b6b,#feca57);color:#fff;padding:16px 20px;display:flex;justify-content:space-between;align-items:center}
+        .chat-header h1{font-size:22px}
+        .chat-header .sub{font-size:13px;opacity:.9}
+        .chat-header .right{text-align:right}
+        .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
+        .status-dot.ok{background:#4caf50}.status-dot.err{background:#f44336}
+        .new-session{background:rgba(255,255,255,.25);border:none;color:#fff;padding:4px 12px;border-radius:12px;font-size:12px;cursor:pointer;margin-top:4px}
+        .new-session:hover{background:rgba(255,255,255,.4)}
+        .chat-messages{flex:1;overflow-y:auto;padding:16px;background:#f5f5f5}
+        .message{margin-bottom:12px;display:flex;animation:fadeIn .3s ease}
+        .message.user{justify-content:flex-end}
+        .message.bot{justify-content:flex-start}
+        .message-content{max-width:82%;padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.6}
+        .message.user .message-content{background:linear-gradient(90deg,#667eea,#764ba2);color:#fff;border-bottom-right-radius:4px}
+        .message.bot .message-content{background:#fff;color:#333;border-bottom-left-radius:4px;box-shadow:0 2px 5px rgba(0,0,0,.08)}
+        .timestamp{font-size:11px;color:#999;margin-top:4px}
+        .message.user .timestamp{text-align:right}
+        .loading{text-align:center;padding:8px;color:#666;font-size:13px;display:none}
+        .loading.show{display:block}
+        .quick-replies{display:flex;flex-wrap:wrap;gap:6px;padding:8px 14px;background:#fff;border-top:1px solid #f0f0f0}
+        .quick-reply{padding:6px 12px;background:#f0f0f0;border:1px solid #e0e0e0;border-radius:16px;font-size:12px;cursor:pointer;transition:all .2s;white-space:nowrap}
+        .quick-reply:hover{background:#667eea;color:#fff;border-color:#667eea}
+        .chat-input{padding:12px 14px;background:#fff;border-top:1px solid #eee;display:flex;gap:8px}
+        .chat-input input{flex:1;padding:10px 14px;border:2px solid #eee;border-radius:22px;font-size:14px;outline:none;transition:border-color .3s}
+        .chat-input input:focus{border-color:#667eea}
+        .chat-input button{padding:10px 20px;background:linear-gradient(90deg,#667eea,#764ba2);color:#fff;border:none;border-radius:22px;font-size:14px;cursor:pointer;transition:transform .2s}
+        .chat-input button:hover{transform:scale(1.05)}
+        .chat-input button:disabled{opacity:.5;cursor:not-allowed;transform:none}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <div>
+                <h1>饭小二</h1>
+                <div class="sub">LangGraph Multi-Agent</div>
+            </div>
+            <div class="right">
+                <div><span class="status-dot" id="statusDot"></span><span id="statusText">checking...</span></div>
+                <button class="new-session" onclick="newSession()">New Session</button>
+            </div>
+        </div>
+        <div class="chat-messages" id="messages">
+            <div class="message bot">
+                <div class="message-content">
+                    哎哟~欢迎光临！我是饭小二，今天想吃点啥？尽管问！
+                    <div class="timestamp">饭小二</div>
+                </div>
+            </div>
+        </div>
+        <div class="loading" id="loading">饭小二正在思考中...</div>
+        <div class="quick-replies">
+            <span class="quick-reply" onclick="sendQuickReply('全部菜单')">全部菜单</span>
+            <span class="quick-reply" onclick="sendQuickReply('推荐老人吃的菜')">老人推荐</span>
+            <span class="quick-reply" onclick="sendQuickReply('花生过敏推荐吃什么')">花生过敏</span>
+            <span class="quick-reply" onclick="sendQuickReply('3个人150元预算')">3人150元</span>
+            <span class="quick-reply" onclick="sendQuickReply('我想订座')">订座</span>
+            <span class="quick-reply" onclick="sendQuickReply('营业到几点')">营业时间</span>
+            <span class="quick-reply" onclick="sendQuickReply('有优惠吗')">优惠活动</span>
+            <span class="quick-reply" onclick="sendQuickReply('菜太咸了')">投诉</span>
+        </div>
+        <div class="chat-input">
+            <input type="text" id="userInput" placeholder="输入你的问题..." onkeypress="handleKeyPress(event)">
+            <button onclick="sendMessage()" id="sendBtn">发送</button>
+        </div>
+    </div>
+    <script>
+        const API_BASE = "http://localhost:8084";
+        let SESSION_ID = "web_" + Math.random().toString(36).substr(2,9);
+        const msgBox = document.getElementById("messages");
+        const input = document.getElementById("userInput");
+        const btn = document.getElementById("sendBtn");
+        const loadEl = document.getElementById("loading");
+
+        function time(){const d=new Date();return d.getHours().toString().padStart(2,"0")+":"+d.getMinutes().toString().padStart(2,"0")}
+
+        function addMsg(html, isUser){
+            const d=document.createElement("div");d.className="message "+(isUser?"user":"bot");
+            const c=document.createElement("div");c.className="message-content";
+            const label=isUser?"me":"fanxiaoer";
+            c.innerHTML=html+'<div class="timestamp">'+label+" &middot; "+time()+"</div>";
+            d.appendChild(c);msgBox.appendChild(d);msgBox.scrollTop=msgBox.scrollHeight;
+        }
+
+        function handleKeyPress(e){if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}}
+        function sendQuickReply(t){input.value=t;sendMessage()}
+
+        async function sendMessage(){
+            const msg=input.value.trim();if(!msg)return;
+            addMsg(msg,true);input.value="";btn.disabled=true;loadEl.classList.add("show");
+            try{
+                const r=await fetch(API_BASE+"/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:msg,session_id:SESSION_ID})});
+                const d=await r.json();
+                if(d.success){
+                    const f=d.reply.replace(/\n/g,"<br>").replace(/\*\*(.*?)\*\*/g,"<strong>$1</strong>");
+                    addMsg(f,false);
+                }else{
+                    addMsg("哎呀，饭小二开小差了~请稍后再试",false);
+                }
+            }catch(e){
+                addMsg("网络开小差了，请检查后端服务是否启动~",false);
+            }finally{btn.disabled=false;loadEl.classList.remove("show");input.focus()}
+        }
+
+        function newSession(){
+            SESSION_ID="web_"+Math.random().toString(36).substr(2,9);
+            msgBox.innerHTML='<div class="message bot"><div class="message-content">新会话已开始！有什么可以帮您？<div class="timestamp">饭小二</div></div></div>';
+        }
+
+        async function checkHealth(){
+            try{
+                const r=await fetch(API_BASE+"/health");
+                const d=await r.json();
+                const dot=document.getElementById("statusDot");
+                const txt=document.getElementById("statusText");
+                if(d.status==="healthy"){dot.className="status-dot ok";txt.textContent="ready"}
+                else{dot.className="status-dot err";txt.textContent="degraded"}
+            }catch(e){
+                document.getElementById("statusDot").className="status-dot err";
+                document.getElementById("statusText").textContent="offline";
+            }
+        }
+
+        checkHealth();
+        setInterval(checkHealth,30000);
+        input.focus();
+    </script>
+</body>
+</html>
