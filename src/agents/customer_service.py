@@ -12,7 +12,9 @@ from langchain_core.output_parsers import StrOutputParser
 class ConversationState:
     """Multi-turn conversation state to track user constraints."""
 
-    FOLLOW_UP = ["还有","换个","不要","刚才","改成","重新","再来","其他的","别的","换一个","不要这个"]
+    # ── Follow-up 关键词 ──
+    FOLLOW_UP_KW = ["还有","换个","不要","刚才","改成","重新","再来",
+                     "其他的","别的","换一个","不要这个","换个清淡","再来一个"]
 
     def __init__(self):
         self.people = 0
@@ -26,7 +28,7 @@ class ConversationState:
         self.last_intent = ""
 
     def reset_constraints(self):
-        """Reset recommendation constraints (but keep conversation history)."""
+        """重置推荐约束（保留对话历史 last_dishes/last_reply）。"""
         self.people = 0
         self.budget = 0
         self.people_type = ""
@@ -34,41 +36,12 @@ class ConversationState:
         self.allergies = []
         self.scene = ""
 
-    def is_new_query(self, text: str) -> bool:
-        """Detect if this is a new independent query (not a follow-up)."""
-        t = text.strip()
-        # Contains a different people_type keyword
-        for k in ["宝宝","小宝宝","婴儿","baby","儿童","小孩","孩子",
-                   "老人","长辈","爸妈","父母","爷爷","奶奶","孕妇",
-                   "健身","减脂","减肥","素食"]:
-            if k in t:
-                return True
-        # Contains explicit people count or budget
-        if re.search(r"\d+\s*个人?", t) or re.search(r"\d+\s*元", t):
-            return True
-        # Contains taste keywords
-        if any(k in t for k in ["辣","清淡","不辣","麻辣"]):
-            return True
-        # Contains allergen keywords
-        for k in ["花生","海鲜","鸡蛋","牛肉","虾","鱼类"]:
-            if k in t:
-                return True
-        # Contains scene keywords
-        if any(k in t for k in ["一人食","一个人","夜宵","下饭","聚餐"]):
-            return True
-        # Contains "推荐" or "特色" or "招牌" → new recommendation request
-        if any(k in t for k in ["推荐","特色","招牌","能吃"]):
-            return True
-        return False
-
     def update_from(self, text: str):
-        """Extract constraints from user text."""
+        """从用户文本提取约束条件。"""
         m = re.search(r"(\d+)\s*个人?", text)
-        if m:
-            self.people = int(m.group(1))
+        if m: self.people = int(m.group(1))
         m = re.search(r"(\d+)\s*元", text)
-        if m:
-            self.budget = int(m.group(1))
+        if m: self.budget = int(m.group(1))
         for k in ["宝宝","小宝宝","婴儿","baby","儿童","小孩","孩子"]:
             if k in text: self.people_type = "儿童"; break
         for k in ["老人","长辈","爸妈","父母","爷爷","奶奶"]:
@@ -85,7 +58,8 @@ class ConversationState:
             if k in text and "不" not in text[:text.index(k)]: self.taste = "辣"
         for k in ["不辣","不要辣","不吃辣","免辣"]:
             if k in text: self.taste = "不辣"
-        allergen_map = {"花生":"花生","海鲜":"海鲜","鸡蛋":"鸡蛋","牛肉":"牛肉","乳制品":"乳制品","麸质":"麸质","虾":"虾","鱼类":"鱼类"}
+        allergen_map = {"花生":"花生","海鲜":"海鲜","鸡蛋":"鸡蛋","牛肉":"牛肉",
+                        "乳制品":"乳制品","麸质":"麸质","虾":"虾","鱼类":"鱼类"}
         for keyword, allergen in allergen_map.items():
             if keyword in text and allergen not in self.allergies:
                 self.allergies.append(allergen)
@@ -107,15 +81,27 @@ class ConversationState:
         self.last_intent = ""
 
     def is_follow_up(self, text: str) -> bool:
-        """Check if this is a follow-up to the previous turn."""
-        t = text.strip()
-        # If this looks like a completely new query, it's not a follow-up
-        if self.is_new_query(t):
+        """
+        判断是否为上一轮的多轮承接。
+
+        严格条件（必须同时满足）：
+        1. 上一轮有推荐结果（last_dishes 非空）
+        2. 当前输入很短（≤12字）—— 长句几乎不可能是 follow-up
+        3. 包含 follow-up 关键词，或是一个简短回答（数字/日期）
+        """
+        if not self.last_dishes:
             return False
-        if len(t) <= 8:
-            for w in self.FOLLOW_UP:
-                if w in t:
-                    return True
+        t = text.strip()
+        # 条件2: 太长的句子不是 follow-up
+        if len(t) > 12:
+            return False
+        # 条件3a: 包含 follow-up 关键词
+        for kw in self.FOLLOW_UP_KW:
+            if kw in t:
+                return True
+        # 条件3b: 纯数字/日期/时间回答（承接订座等场景）
+        if re.match(r"^[\d\s:/\-\.月日号点晚上早上午下午]+$", t) and len(t) <= 10:
+            return True
         return False
 
     def to_dict(self) -> dict:
