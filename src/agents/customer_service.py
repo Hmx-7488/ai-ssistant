@@ -73,11 +73,14 @@ class ConversationState:
             if k in text and "不" not in text[:text.index(k)]: self.taste = "辣"
         for k in ["不辣","不要辣","不吃辣","免辣"]:
             if k in text: self.taste = "不辣"
-        allergen_map = {"花生":"花生","海鲜":"海鲜","鸡蛋":"鸡蛋","牛肉":"牛肉",
-                        "乳制品":"乳制品","麸质":"麸质","虾":"虾","鱼类":"鱼类"}
-        for keyword, allergen in allergen_map.items():
-            if keyword in text and allergen not in self.allergies:
-                self.allergies.append(allergen)
+        # 过敏原：只在有负面语境时才提取（过敏/不吃/不要/避开/不能吃/忌口）
+        _neg_ctx = any(k in text for k in ["过敏","不吃","不要","避开","不能吃","忌口","难受"])
+        if _neg_ctx:
+            allergen_map = {"花生":"花生","海鲜":"海鲜","鸡蛋":"鸡蛋","牛肉":"牛肉",
+                            "乳制品":"乳制品","麸质":"麸质","虾":"虾","鱼类":"鱼类"}
+            for keyword, allergen in allergen_map.items():
+                if keyword in text and allergen not in self.allergies:
+                    self.allergies.append(allergen)
         for k in ["一人食","一个人","自己吃"]:
             if k in text: self.scene = "一人食"; break
         for k in ["约会","两人","两个人","情侣"]:
