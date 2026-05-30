@@ -25,6 +25,42 @@ class ConversationState:
         self.last_reply = ""
         self.last_intent = ""
 
+    def reset_constraints(self):
+        """Reset recommendation constraints (but keep conversation history)."""
+        self.people = 0
+        self.budget = 0
+        self.people_type = ""
+        self.taste = ""
+        self.allergies = []
+        self.scene = ""
+
+    def is_new_query(self, text: str) -> bool:
+        """Detect if this is a new independent query (not a follow-up)."""
+        t = text.strip()
+        # Contains a different people_type keyword
+        for k in ["宝宝","小宝宝","婴儿","baby","儿童","小孩","孩子",
+                   "老人","长辈","爸妈","父母","爷爷","奶奶","孕妇",
+                   "健身","减脂","减肥","素食"]:
+            if k in t:
+                return True
+        # Contains explicit people count or budget
+        if re.search(r"\d+\s*个人?", t) or re.search(r"\d+\s*元", t):
+            return True
+        # Contains taste keywords
+        if any(k in t for k in ["辣","清淡","不辣","麻辣"]):
+            return True
+        # Contains allergen keywords
+        for k in ["花生","海鲜","鸡蛋","牛肉","虾","鱼类"]:
+            if k in t:
+                return True
+        # Contains scene keywords
+        if any(k in t for k in ["一人食","一个人","夜宵","下饭","聚餐"]):
+            return True
+        # Contains "推荐" or "特色" or "招牌" → new recommendation request
+        if any(k in t for k in ["推荐","特色","招牌","能吃"]):
+            return True
+        return False
+
     def update_from(self, text: str):
         """Extract constraints from user text."""
         m = re.search(r"(\d+)\s*个人?", text)
@@ -33,7 +69,7 @@ class ConversationState:
         m = re.search(r"(\d+)\s*元", text)
         if m:
             self.budget = int(m.group(1))
-        for k in ["儿童","小孩","孩子","baby","婴儿"]:
+        for k in ["宝宝","小宝宝","婴儿","baby","儿童","小孩","孩子"]:
             if k in text: self.people_type = "儿童"; break
         for k in ["老人","长辈","爸妈","父母","爷爷","奶奶"]:
             if k in text: self.people_type = "老人"; break
@@ -73,6 +109,9 @@ class ConversationState:
     def is_follow_up(self, text: str) -> bool:
         """Check if this is a follow-up to the previous turn."""
         t = text.strip()
+        # If this looks like a completely new query, it's not a follow-up
+        if self.is_new_query(t):
+            return False
         if len(t) <= 8:
             for w in self.FOLLOW_UP:
                 if w in t:
@@ -160,6 +199,23 @@ class MenuQAAgent:
                 return f"{d.name}可以调辣度，跟服务员说就行~"
         if "不要" in inp and "香菜" in inp:
             return "可以！下单时跟服务员说不要香菜，厨房会单独处理~"
+        # 食材成分提问（"XX有放YY吗"）
+        ingredient_q = re.search(r"有放(.+?)吗|放了(.+?)吗|有(.+?)吗", inp)
+        if ingredient_q:
+            ingredient = (ingredient_q.group(1) or ingredient_q.group(2) or ingredient_q.group(3) or "").strip()
+            d = self.kb.find_dish(inp)
+            if d:
+                # Check avoid list and allergens
+                has_it = ingredient in str(d.allergens) or ingredient in str(getattr(d, 'avoid', []))
+                note = f"{d.name}的配菜有：豆芽、藕片、木耳等" if "烤鱼" in d.name else ""
+                if ingredient == "香菜":
+                    return f"{d.name}默认不放香菜，如果有忌口下单时跟服务员确认一下就行~"
+                if note:
+                    return note + f"。{ingredient}的话跟服务员说一声可以单独处理~"
+                return f"{d.name}的具体配料建议跟服务员确认一下哦~"
+            # General question
+            if ingredient == "香菜":
+                return "大部分菜默认不放香菜，有忌口的话下单时跟服务员说一声就行~"
         # 菜品详情查询
         d = self.kb.find_dish(inp)
         if d:
@@ -204,11 +260,21 @@ class RecommendAgent:
             return self._by_budget(state)
         if state.scene:
             return self._by_scene(state)
+        if state.taste == "辣":
+            return self._spicy(state)
         if state.taste == "不辣":
             return self._non_spicy(state)
         if state.taste == "清淡":
             return self._light(state)
-        # 默认招牌推荐
+        # 默认：特色菜 / 招牌推荐
+        t = inp.lower()
+        if "特色" in t or "招牌" in t:
+            sig = self.kb.get_dishes_by_tag("招牌")
+            lines = [f"**{d.name}** {d.price}元 - {d.description[:35]}" for d in sig[:3]]
+            reply = "我们的特色菜：\n" + "\n".join(lines)
+            state.last_dishes = [d.name for d in sig[:3]]
+            state.last_reply = reply
+            return reply
         sig = self.kb.get_dishes_by_tag("招牌")
         lines = [f"**{d.name}** {d.price}元 - {d.description[:25]}..." for d in sig[:3]]
         reply = "推荐招牌菜：\n" + "\n".join(lines)
@@ -320,6 +386,14 @@ class RecommendAgent:
         ctx = retrieve_context(f"{state.scene}场景推荐")
         return self.chain.invoke({"input": f"{state.scene}推荐菜品\n{ctx}"})
 
+    def _spicy(self, state):
+        dishes = [d for d in self.kb.dishes if "辣" in d.spice and "不辣" not in d.spice]
+        lines = [f"**{d.name}** {d.price}元 - {d.description[:30]}" for d in dishes[:4]]
+        reply = "辣味好菜🌶️：\n" + "\n".join(lines) + "\n辣度可选：微辣/中辣/特辣，跟服务员说就行~"
+        state.last_dishes = [d.name for d in dishes[:4]]
+        state.last_reply = reply
+        return reply
+
     def _non_spicy(self, state):
         dishes = [d for d in self.kb.dishes if "不辣" in d.spice][:4]
         lines = [f"**{d.name}** {d.price}元" for d in dishes]
@@ -329,9 +403,9 @@ class RecommendAgent:
         return reply
 
     def _light(self, state):
-        dishes = [d for d in self.kb.dishes if "清淡" in d.tags or "不辣" in d.spice][:4]
+        dishes = [d for d in self.kb.dishes if "清淡" in d.tags][:4]
         lines = [f"**{d.name}** {d.price}元" for d in (dishes or self.kb.dishes[:3])]
-        reply = "清淡系：\n" + "\n".join(lines)
+        reply = "清淡系🥗：\n" + "\n".join(lines)
         state.last_dishes = [d.name for d in (dishes or self.kb.dishes[:3])]
         state.last_reply = reply
         return reply
@@ -474,11 +548,11 @@ class CustomerServiceAgent:
         def router_node(state: GraphState) -> GraphState:
             cs = state["state_obj"]
             is_follow = cs.is_follow_up(state["inp"])
-            if not is_follow:
-                cs.update_from(state["inp"])
-            # 多轮承接直接走推荐，不再走意图分类
             if is_follow and cs.last_dishes:
                 return {**state, "intent": "follow_recommend", "is_follow": True}
+            # 新查询：重置约束再提取新约束
+            cs.reset_constraints()
+            cs.update_from(state["inp"])
             intent = self.router.invoke(state["inp"])
             cs.last_intent = intent
             return {**state, "intent": intent, "is_follow": False}
