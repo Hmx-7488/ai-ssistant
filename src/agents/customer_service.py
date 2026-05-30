@@ -3,6 +3,7 @@ import os, sys, re, random
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 from src.agents.router_agent import RouterAgent
 from src.tools.unified_kb import get_unified_kb
+from src.tools.faq_engine import match_faq
 from src.tools.vector_store import retrieve_context
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -51,11 +52,14 @@ class ConversationState:
 
     def update_from(self, text: str):
         """从用户文本提取约束条件。"""
+        # 人数：支持阿拉伯数字和中文数字
         m = re.search(r"(\d+)\s*个人?", text)
         if m: self.people = int(m.group(1))
         elif re.search(r"[一二两三四五六七八九十]\s*个人", text):
             self.people = _parse_int(text)
-        m = re.search(r"(\d+)\s*元", text)
+        # 预算：支持"500元"、"预算500"、"预算500元"
+        m = re.search(r"预算\s*(\d+)", text)
+        if not m: m = re.search(r"(\d+)\s*元", text)
         if m: self.budget = int(m.group(1))
         for k in ["宝宝","小宝宝","婴儿","baby","儿童","小孩","孩子"]:
             if k in text: self.people_type = "儿童"; break
@@ -157,6 +161,12 @@ class MenuQAAgent:
 
     def invoke(self, inp: str, state: ConversationState) -> str:
         t = inp.lower()
+
+        # ── 0. FAQ 知识库优先匹配（50+ 结构化问答，100% 确定性） ──
+        faq_answer = match_faq(inp)
+        if faq_answer and faq_answer != "dynamic":
+            return faq_answer
+
         # ── 确定性快速路径（不调用 LLM） ──
         if "菜单" in t or "所有菜" in t or "全部菜" in t:
             return self._format_menu()
@@ -666,6 +676,10 @@ class CustomerServiceAgent:
             t = state["inp"].strip().lower()
             if t in fast:
                 return {**state, "reply": fast[t]}
+            # FAQ 兜底：在 RAG 之前先查结构化 FAQ
+            faq = match_faq(state["inp"])
+            if faq and faq != "dynamic":
+                return {**state, "reply": faq}
             ctx = retrieve_context(state["inp"], top_k=3)
             if not ctx:
                 ctx = "（无相关知识库内容）"
