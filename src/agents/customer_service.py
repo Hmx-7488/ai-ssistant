@@ -228,6 +228,17 @@ class MenuQAAgent:
                 if d.allergens:
                     allergy_warn = f"\n⚠️ 提醒：含过敏原（{'、'.join(d.allergens)}）"
                 return f"好的！**{d.name}** {d.price}元 已记下~{allergy_warn}\n有忌口或过敏吗？要不要清淡/不辣？"
+        # 常见主食/配料（不在菜品列表但顾客常问）
+        _STAPLES = {
+            "米饭": "米饭免费续碗！点菜自动送~",
+            "白饭": "米饭免费续碗！点菜自动送~",
+            "馒头": "馒头2元/个，手工现蒸~",
+            "煎饼": "葱油煎饼8元，香脆可口~",
+            "饺子": "手工水饺28元/份（20个），可选猪肉白菜/韭菜鸡蛋~",
+        }
+        for name, answer in _STAPLES.items():
+            if name in inp:
+                return answer
         # 菜品详情查询 + 主动追问忌口
         d = self.kb.find_dish(inp)
         if d:
@@ -237,8 +248,8 @@ class MenuQAAgent:
             if any(w in inp for w in ["多少钱", "价格", "来一份", "我要"]):
                 info += "\n有忌口或过敏吗？"
             return info
-        # 模糊指代 → 反问
-        if any(w in t for w in ["那个","这个","多少钱"]) and "人均" not in t:
+        # 模糊指代 → 反问（只在确实找不到任何菜品时触发）
+        if any(w in t for w in ["那个","这个"]) and "人均" not in t:
             return "想问哪道菜价格？说个菜名我帮你查~"
         # RAG 兜底
         ctx = retrieve_context(inp, top_k=3)
@@ -265,6 +276,28 @@ class RecommendAgent:
             ("human", "{input}")
         ]) | llm | StrOutputParser()
 
+    # 食材/类别关键词 → 过滤条件
+    _CATEGORY_FILTERS = {
+        "素菜": lambda d: "素食" in d.tags or "蔬菜" in d.tags,
+        "素食": lambda d: "素食" in d.tags or "蔬菜" in d.tags,
+        "肉": lambda d: "肉食" in d.tags,
+        "海鲜": lambda d: "海鲜" in d.tags,
+        "鱼": lambda d: "海鲜" in d.tags,
+        "汤": lambda d: d.category == "汤品",
+        "主食": lambda d: d.category == "主食",
+        "饮品": lambda d: d.category == "饮品",
+        "甜品": lambda d: d.category == "甜品",
+        "下饭": lambda d: "下饭" in d.tags,
+    }
+
+    def _filter_by_keyword(self, inp: str):
+        """根据输入中的类别关键词筛选菜品。"""
+        t = inp.lower()
+        for kw, filt in self._CATEGORY_FILTERS.items():
+            if kw in t:
+                return [d for d in self.kb.dishes if filt(d)]
+        return None
+
     def invoke(self, inp: str, state: ConversationState, is_follow: bool) -> str:
         if is_follow and state.last_dishes:
             return self._follow_up(inp, state)
@@ -282,6 +315,15 @@ class RecommendAgent:
             return self._non_spicy(state)
         if state.taste == "清淡":
             return self._light(state)
+        # 类别关键词筛选（素菜/海鲜/汤/主食...）
+        filtered = self._filter_by_keyword(inp)
+        if filtered:
+            picks = filtered[:4]
+            lines = [f"**{d.name}** {d.price}元 - {d.description[:25]}" for d in picks]
+            state.last_dishes = [d.name for d in picks]
+            reply = "推荐这些：\n" + "\n".join(lines)
+            state.last_reply = reply
+            return reply
         # 默认：特色菜 / 招牌推荐 + 引导补充信息
         t = inp.lower()
         sig = self.kb.get_dishes_by_tag("招牌")
