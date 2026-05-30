@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, sys, re
+import os, sys, re, random
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 from src.agents.router_agent import RouterAgent
 from src.tools.unified_kb import get_unified_kb
@@ -7,6 +7,19 @@ from src.tools.vector_store import retrieve_context
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+
+# 中文数字 → 阿拉伯数字
+_CN_DIGITS = {"零":0,"一":1,"二":2,"两":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10}
+
+def _parse_int(text: str, default: int = 0) -> int:
+    """从文本中提取整数，支持阿拉伯数字和中文数字。"""
+    # 先试阿拉伯数字
+    m = re.search(r"(\d+)", text)
+    if m: return int(m.group(1))
+    # 再试中文数字
+    for ch, val in _CN_DIGITS.items():
+        if ch in text: return val
+    return default
 
 
 class ConversationState:
@@ -40,6 +53,8 @@ class ConversationState:
         """从用户文本提取约束条件。"""
         m = re.search(r"(\d+)\s*个人?", text)
         if m: self.people = int(m.group(1))
+        elif re.search(r"[一二两三四五六七八九十]\s*个人", text):
+            self.people = _parse_int(text)
         m = re.search(r"(\d+)\s*元", text)
         if m: self.budget = int(m.group(1))
         for k in ["宝宝","小宝宝","婴儿","baby","儿童","小孩","孩子"]:
@@ -202,11 +217,26 @@ class MenuQAAgent:
             # General question
             if ingredient == "香菜":
                 return "大部分菜默认不放香菜，有忌口的话下单时跟服务员说一声就行~"
-        # 菜品详情查询
+        # 点菜意图（"我要/来/点一份XX"）
+        order_m = re.search(r"[我要来点来搞]\s*[一份个]?\s*(.+)", inp)
+        if order_m:
+            dish_name = order_m.group(1).strip().rstrip("，。！?")
+            d = self.kb.find_dish(dish_name)
+            if d:
+                state.last_dishes = [d.name]
+                allergy_warn = ""
+                if d.allergens:
+                    allergy_warn = f"\n⚠️ 提醒：含过敏原（{'、'.join(d.allergens)}）"
+                return f"好的！**{d.name}** {d.price}元 已记下~{allergy_warn}\n有忌口或过敏吗？要不要清淡/不辣？"
+        # 菜品详情查询 + 主动追问忌口
         d = self.kb.find_dish(inp)
         if d:
             state.last_dishes = [d.name]
-            return self.kb.format_dish_info(d)
+            info = self.kb.format_dish_info(d)
+            # 如果用户是在问价格（不是纯好奇），追加忌口确认
+            if any(w in inp for w in ["多少钱", "价格", "来一份", "我要"]):
+                info += "\n有忌口或过敏吗？"
+            return info
         # 模糊指代 → 反问
         if any(w in t for w in ["那个","这个","多少钱"]) and "人均" not in t:
             return "想问哪道菜价格？说个菜名我帮你查~"
@@ -252,19 +282,21 @@ class RecommendAgent:
             return self._non_spicy(state)
         if state.taste == "清淡":
             return self._light(state)
-        # 默认：特色菜 / 招牌推荐
+        # 默认：特色菜 / 招牌推荐 + 引导补充信息
         t = inp.lower()
-        if "特色" in t or "招牌" in t:
-            sig = self.kb.get_dishes_by_tag("招牌")
-            lines = [f"**{d.name}** {d.price}元 - {d.description[:35]}" for d in sig[:3]]
-            reply = "我们的特色菜：\n" + "\n".join(lines)
-            state.last_dishes = [d.name for d in sig[:3]]
-            state.last_reply = reply
-            return reply
         sig = self.kb.get_dishes_by_tag("招牌")
-        lines = [f"**{d.name}** {d.price}元 - {d.description[:25]}..." for d in sig[:3]]
-        reply = "推荐招牌菜：\n" + "\n".join(lines)
-        state.last_dishes = [d.name for d in sig[:3]]
+        if "特色" in t or "招牌" in t:
+            picks = sig[:3]
+            lines = [f"**{d.name}** {d.price}元 - {d.description[:35]}" for d in picks]
+            reply = "我们的特色菜：\n" + "\n".join(lines) + "\n想了解哪道菜的详情？或者告诉我人数和预算，帮你搭配~"
+        else:
+            # 随机选2-3道不同方向的菜，避免千篇一律
+            all_dishes = list(self.kb.dishes)
+            random.shuffle(all_dishes)
+            picks = all_dishes[:3]
+            lines = [f"**{d.name}** {d.price}元 - {d.description[:25]}" for d in picks]
+            reply = "给你几个方向：\n" + "\n".join(lines) + "\n有忌口吗？几个人吃、预算多少？帮你精准推荐~"
+        state.last_dishes = [d.name for d in picks]
         state.last_reply = reply
         return reply
 
@@ -421,12 +453,21 @@ class RecommendAgent:
             state.last_dishes = [d.name for d in recs]
             label = f"（{state.taste}）" if state.taste else ""
             return f"再来几道{label}：\n" + "\n".join(lines)
-        if "改成" in t:
-            m = re.search(r"(\d+)\s*个人?", t)
+        # 预算修改（优先于"改成"，避免误匹配人数）
+        if "预算" in t:
+            m = re.search(r"(\d+)", t)
             if m:
-                state.people = int(m.group(1))
-                if state.budget > 0: return self._by_budget(state)
-                return f"好的，改成{state.people}人了！有预算要求吗？"
+                state.budget = int(m.group(1))
+                if state.people > 0: return self._by_budget(state)
+                return f"好的，预算改成{state.budget}元！几个人吃？"
+        # 人数修改（"改成X个人" 或 "改成两个人"）
+        if "改成" in t or "改" in t:
+            if "个人" in t or "人" in t:
+                n = _parse_int(t)
+                if n > 0:
+                    state.people = n
+                    if state.budget > 0: return self._by_budget(state)
+                    return f"好的，改成{state.people}人了！有预算要求吗？"
         return self.invoke(inp, state, False)
 
 

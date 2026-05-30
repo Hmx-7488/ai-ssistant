@@ -118,7 +118,7 @@ sid2 = "pf_mt2"
 try:
     r1 = post("/chat", {"message": "3个人150元", "session_id": sid2})
     r2 = post("/chat", {"message": "改成两个人", "session_id": sid2})
-    ok = r1.get("success") and r2.get("success") and "2" in r2.get("reply","")
+    ok = r1.get("success") and r2.get("success") and "2人" in r2.get("reply","")
     check("3p 150y -> 2p", ok, r2.get("reply","")[:60])
 except Exception as e:
     check("3p 150y -> 2p", False, str(e))
