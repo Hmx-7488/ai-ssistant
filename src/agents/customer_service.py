@@ -251,7 +251,8 @@ class ConversationState:
         _neg_ctx = any(k in text for k in ["过敏","不吃","不要","避开","不能吃","忌口","难受"])
         if _neg_ctx:
             allergen_map = {"花生":"花生","海鲜":"海鲜","鸡蛋":"鸡蛋","牛肉":"牛肉",
-                            "乳制品":"乳制品","麸质":"麸质","虾":"虾","鱼类":"鱼类"}
+                            "乳制品":"乳制品","麸质":"麸质","虾":"虾","鱼类":"鱼类",
+                            "香菜":"不吃香菜","葱":"不吃葱","姜":"不吃姜","蒜":"不吃蒜"}
             for keyword, allergen in allergen_map.items():
                 if keyword in text and allergen not in self.allergies:
                     self.allergies.append(allergen)
@@ -424,13 +425,21 @@ class MenuQAAgent:
             return "生日特权：全单9折+送长寿面+甜品，提前3天预约还有气球布置~"
         if "包间" in t:
             return "4个包间：小包间(4-6人)低消300、大包间(8-12人)低消600、VIP(10-16人)低消1000带KTV，提前3天订~"
-        # 按分类查询（汤/饮品/甜品/主食）
+        # 按分类查询（配菜/汤/饮品/甜品/主食）
         for cat, label in [("汤","汤品"),("饮品","饮品"),("饮料","饮品"),("甜品","甜品"),("主食","主食"),("甜点","甜品")]:
             if cat in t:
                 ds = self.kb.get_dishes_by_category(label)
                 if ds:
                     lines = [f"**{d.name}** {d.price}元 - {d.description[:20]}" for d in ds]
                     return f"{label}有这些：\n" + "\n".join(lines)
+        # 配菜查询（热菜中非招牌的菜品）
+        if "配菜" in t:
+            sides = [d for d in self.kb.dishes if d.category == "热菜"]
+            if sides:
+                lines = [f"**{d.name}** {d.price}元 - {d.description[:25]}" for d in sides]
+                reply = "配菜推荐：\n" + "\n".join(lines)
+                reply += "\n想搭配哪道主菜？告诉我菜名帮你配~"
+                return reply
         # 辣度查询：只在用户提到具体菜品时走快速路径，否则交给推荐Agent
         if "辣" in t and "烤鱼" in t:
             return "秘制烤鱼可选微辣/中辣/特辣，跟服务员说一声就行~"
@@ -682,15 +691,21 @@ class RecommendAgent:
         }
         for a in state.allergies:
             if a in _avoid_ingredients:
-                # 排除 description 或 tags 中含有该食材的菜品
                 for ingredient in _avoid_ingredients[a]:
                     safe = [d for d in safe if ingredient not in d.description and ingredient not in str(d.tags)]
             else:
-                # 标准过敏原：直接排除 allergens 列表中含有的
                 safe = [d for d in safe if a not in d.allergens]
         recs = safe[:4] or self.kb.dishes[:3]
         lines = [f"**{d.name}** {d.price}元" for d in recs]
-        reply = f"避开{','.join(state.allergies)}，推荐：\n" + "\n".join(lines)
+        # 构建更具体的回复
+        has_preference = any(a in _avoid_ingredients for a in state.allergies)
+        if has_preference:
+            items = [a.replace("不吃","") for a in state.allergies if a in _avoid_ingredients]
+            reply = f"收到，不吃{'、'.join(items)}~ 这些都可以放心点：\n" + "\n".join(lines)
+            reply += "\n下单时跟服务员确认一下忌口就行~"
+        else:
+            reply = f"避开过敏原{','.join(state.allergies)}，这些可以放心点：\n" + "\n".join(lines)
+            reply += "\n⚠️ 如有严重过敏，建议跟服务员确认具体食材~"
         state.last_dishes = [d.name for d in recs]
         state.last_reply = reply
         return reply
