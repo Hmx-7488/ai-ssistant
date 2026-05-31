@@ -6,7 +6,8 @@ from src.tools.unified_kb import get_unified_kb
 from src.tools.faq_engine import match_faq
 from src.tools.vector_store import retrieve_context
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.output_parsers import StrOutputParser
 
 # 中文数字 → 阿拉伯数字
@@ -21,6 +22,130 @@ def _parse_int(text: str, default: int = 0) -> int:
     for ch, val in _CN_DIGITS.items():
         if ch in text: return val
     return default
+
+
+# ═══════════════════════════════════════════════════════════
+# ToolAgent：LLM + Function Calling 工具调用基类
+# ═══════════════════════════════════════════════════════════
+
+class ToolAgent:
+    """
+    Base class for LLM agents with tool calling (Function Calling).
+
+    Subclass and set self.system_prompt + self.tools in __init__.
+    invoke() runs a loop: LLM → tool_calls → execute → feed back → repeat.
+    """
+    def __init__(self, llm, system_prompt: str, tools: list):
+        self.system_prompt = system_prompt
+        self.tools = tools
+        self.tools_by_name = {t.name: t for t in tools}
+        self.llm_with_tools = llm.bind_tools(tools)
+
+    def invoke(self, user_input: str, context: str = "") -> str:
+        """Run the tool-calling loop and return a text response."""
+        sys_msg = self.system_prompt
+        if context:
+            sys_msg += f"\n\n当前上下文：{context}"
+        messages = [SystemMessage(content=sys_msg), HumanMessage(content=user_input)]
+
+        for _ in range(5):  # max 5 tool-calling rounds
+            ai_msg = self.llm_with_tools.invoke(messages)
+            messages.append(ai_msg)
+
+            if not ai_msg.tool_calls:
+                return ai_msg.content or ""
+
+            for tc in ai_msg.tool_calls:
+                tool_fn = self.tools_by_name.get(tc["name"])
+                if tool_fn:
+                    result = tool_fn.invoke(tc["args"])
+                else:
+                    result = f"未知工具: {tc['name']}"
+                messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+
+        # Final call without tools to get a text response
+        final = self.llm_with_tools.invoke(messages)
+        return final.content or ""
+
+
+# ═══════════════════════════════════════════════════════════
+# 专用工具调用 Agent（LLM + Tools 版本）
+# ═══════════════════════════════════════════════════════════
+
+class MenuToolAgent(ToolAgent):
+    """菜品问答 Agent（LLM + Tools 版本）"""
+    def __init__(self, llm):
+        from src.tools.agent_tools import MENU_TOOLS, BOOKING_TOOLS
+        super().__init__(
+            llm,
+            system_prompt=(
+                "你是饭小二餐厅的菜品问答专家。你的职责是回答顾客关于菜品、价格、"
+                "菜单、食材、营业信息等问题。\n"
+                "规则：\n"
+                "1. 使用工具查询菜品信息，不要编造\n"
+                "2. 回复简洁，1-2句话\n"
+                "3. 语气温暖亲切，适当用emoji\n"
+                "4. 涉及过敏原要特别提醒\n"
+                "5. 不确定的信息建议联系人工客服"
+            ),
+            tools=MENU_TOOLS + BOOKING_TOOLS,
+        )
+
+
+class RecommendToolAgent(ToolAgent):
+    """推荐 Agent（LLM + Tools 版本）"""
+    def __init__(self, llm):
+        from src.tools.agent_tools import RECOMMEND_TOOLS, MENU_TOOLS
+        super().__init__(
+            llm,
+            system_prompt=(
+                "你是饭小二，幽默的餐厅推荐专家。你的职责是根据顾客需求推荐菜品。\n"
+                "规则：\n"
+                "1. 使用工具查询和推荐菜品，不要编造\n"
+                "2. 有预算时，用 recommend_combo 工具搭配套餐\n"
+                "3. 有过敏/忌口时，用 check_allergen 工具逐一检查\n"
+                "4. 有人群类型时，用 recommend_for_people 工具\n"
+                "5. 回复带emoji，突出亮点，2-3句话\n"
+                "6. 推荐后主动询问是否满意、有无忌口"
+            ),
+            tools=RECOMMEND_TOOLS + MENU_TOOLS,
+        )
+
+
+class BookingToolAgent(ToolAgent):
+    """订座 Agent（LLM + Tools 版本）"""
+    def __init__(self, llm):
+        from src.tools.agent_tools import BOOKING_TOOLS
+        super().__init__(
+            llm,
+            system_prompt=(
+                "你是饭小二订座助手。你的职责是帮顾客预订座位。\n"
+                "规则：\n"
+                "1. 引导顾客提供：日期时间、人数、是否需要包间、联系电话\n"
+                "2. 使用 get_restaurant_info 查询包间信息\n"
+                "3. 回复简洁，2句话内\n"
+                "4. 确认信息后告知预订成功"
+            ),
+            tools=BOOKING_TOOLS,
+        )
+
+
+class ComplaintToolAgent(ToolAgent):
+    """投诉 Agent（LLM + Tools 版本）"""
+    def __init__(self, llm):
+        from src.tools.agent_tools import COMPLAINT_TOOLS
+        super().__init__(
+            llm,
+            system_prompt=(
+                "你是饭小二投诉处理专员。你的职责是处理顾客投诉和不满。\n"
+                "规则：\n"
+                "1. 真诚道歉，不推卸责任\n"
+                "2. 给出具体解决方案（重做/换菜/免单/补偿）\n"
+                "3. 2句话内，语气诚恳\n"
+                "4. 严重问题建议转人工客服"
+            ),
+            tools=COMPLAINT_TOOLS,
+        )
 
 
 class ConversationState:
@@ -173,6 +298,7 @@ class MenuQAAgent:
     """菜品问答 Agent：价格、菜单、食材、营业信息。"""
     def __init__(self, llm):
         self.kb = get_unified_kb()
+        self.tool_agent = MenuToolAgent(llm)
         self.chain = ChatPromptTemplate.from_messages([
             ("system", "你是饭小二餐厅的菜品问答专家。根据知识库回答，不编造。回复简洁，1-2句。"),
             ("human", "{input}")
@@ -302,9 +428,10 @@ class MenuQAAgent:
         # 模糊指代 → 反问（只在确实找不到任何菜品时触发）
         if any(w in t for w in ["那个","这个"]) and "人均" not in t:
             return "想问哪道菜价格？说个菜名我帮你查~"
-        # RAG 兜底
+        # RAG 兜底 → ToolAgent（LLM + Function Calling）
         ctx = retrieve_context(inp, top_k=3)
-        return self.chain.invoke({"input": inp + ("\n参考：" + ctx if ctx else "")})
+        context = ctx if ctx else ""
+        return self.tool_agent.invoke(inp, context=context)
 
     def _format_menu(self) -> str:
         cats = {}
@@ -322,6 +449,7 @@ class RecommendAgent:
     """推荐 Agent：人群、过敏、预算、场景、口味推荐。"""
     def __init__(self, llm):
         self.kb = get_unified_kb()
+        self.tool_agent = RecommendToolAgent(llm)
         self.chain = ChatPromptTemplate.from_messages([
             ("system", "你是饭小二，幽默的餐厅推荐专家。根据菜品信息推荐，突出亮点，带emoji。"),
             ("human", "{input}")
@@ -400,7 +528,7 @@ class RecommendAgent:
         info = self.kb.recommend_for_people(state.people_type)
         if not info:
             ctx = retrieve_context(f"推荐{state.people_type}吃的菜")
-            return self.chain.invoke({"input": f"推荐{state.people_type}吃的菜\n{ctx}"})
+            return self.tool_agent.invoke(f"推荐{state.people_type}吃的菜", context=ctx or "")
         recs = info.get("推荐", [])
         note = info.get("说明", "")
 
@@ -569,7 +697,7 @@ class RecommendAgent:
             state.last_reply = reply
             return reply
         ctx = retrieve_context(f"{state.scene}场景推荐")
-        return self.chain.invoke({"input": f"{state.scene}推荐菜品\n{ctx}"})
+        return self.tool_agent.invoke(f"{state.scene}推荐菜品", context=ctx or "")
 
     def _spicy(self, state):
         dishes = [d for d in self.kb.dishes if "辣" in d.spice and "不辣" not in d.spice]
@@ -641,6 +769,7 @@ class RecommendAgent:
 class ReservationAgent:
     """订座 Agent。"""
     def __init__(self, llm):
+        self.tool_agent = BookingToolAgent(llm)
         self.chain = ChatPromptTemplate.from_messages([
             ("system", "你是饭小二订座助手。引导用户确认日期、人数、是否包间、电话。"),
             ("human", "{input}")
@@ -649,8 +778,11 @@ class ReservationAgent:
     def invoke(self, inp: str, state: ConversationState) -> str:
         parts = []
         if state.people > 0: parts.append(f"{state.people}人")
+        # 快速路径
         if parts:
             return f"好的，{','.join(parts)}！请告诉我具体日期时间和联系电话~"
+        if any(w in inp for w in ["包间", "包厢"]):
+            return self.tool_agent.invoke(inp, context=state.context_summary())
         return "请告诉我：日期时间、人数、是否需要包间、联系电话~"
 
 
@@ -668,6 +800,7 @@ class ComplaintAgent:
     }
 
     def __init__(self, llm):
+        self.tool_agent = ComplaintToolAgent(llm)
         self.chain = ChatPromptTemplate.from_messages([
             ("system", "饭小二处理投诉。真诚道歉+给方案。2句话内。"),
             ("human", "{input}")
@@ -679,8 +812,8 @@ class ComplaintAgent:
         for keyword, reply in self.FAST_COMPLAINTS.items():
             if keyword in t:
                 return reply
-        # LLM 兜底（不调 RAG，投诉场景不需要知识库）
-        return self.chain.invoke({"input": f"顾客说：{inp}"})
+        # LLM 兜底 → ToolAgent（LLM + Function Calling）
+        return self.tool_agent.invoke(f"顾客说：{inp}", context=state.context_summary())
 
 
 class OrderAgent:
