@@ -273,7 +273,6 @@ class ConversationState:
                     self.allergies.append(f"不吃{val}")
         # 订座信息提取
         self._extract_reservation(text)
-        self.last_intent = ""
 
     _CN_NUM = {"一":1,"二":2,"两":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10,"十一":11,"十二":12}
 
@@ -385,8 +384,31 @@ class MenuQAAgent:
 
     def invoke(self, inp: str, state: ConversationState) -> str:
         t = inp.lower()
+        print(f"[MenuQA] invoke called with: {inp}")
 
-        # ── 0. FAQ 知识库优先匹配（50+ 结构化问答，100% 确定性） ──
+        # ── 0. 订单意图优先于FAQ（避免"点一份宫保鸡丁中辣"被辣度FAQ拦截） ──
+        _order_match = re.search(r"[点要来想吃]\s*(?:一份|一个|些|个|份)?\s*(.+)", inp)
+        print(f"[MenuQA] order_match={bool(_order_match)}")
+        if _order_match:
+            raw_dish = _order_match.group(1).strip().rstrip("，。！?")
+            _dish_name = re.sub(r"(微辣|中辣|特辣|中份|大份|小份|冰的|热的|常温)$", "", raw_dish).strip()
+            if not _dish_name: _dish_name = raw_dish
+            d = self.kb.find_dish(_dish_name)
+            if not d and _dish_name != raw_dish:
+                d = self.kb.find_dish(raw_dish)
+            if d:
+                state.last_dishes = [d.name]
+                spice_note = ""
+                for kw, label in [("特辣","特辣"),("中辣","中辣"),("微辣","微辣"),("不辣","不辣")]:
+                    if kw in raw_dish:
+                        spice_note = f"，{label}已记下~"
+                        break
+                allergy_warn = ""
+                if d.allergens:
+                    allergy_warn = f"\n⚠️ 提醒：含过敏原（{'、'.join(d.allergens)}）"
+                return f"好的！**{d.name}** {d.price}元 已记下{spice_note}{allergy_warn}\n还有其他需要的吗？"
+
+        # ── 0b. FAQ 知识库匹配（50+ 结构化问答，100% 确定性） ──
         faq_answer = match_faq(inp)
         if faq_answer and faq_answer != "dynamic":
             return faq_answer
@@ -440,16 +462,18 @@ class MenuQAAgent:
                 reply = "配菜推荐：\n" + "\n".join(lines)
                 reply += "\n想搭配哪道主菜？告诉我菜名帮你配~"
                 return reply
-        # 辣度查询：只在用户提到具体菜品时走快速路径，否则交给推荐Agent
+        # 辣度查询（无订单意图时才走快速路径）
         if "辣" in t and "烤鱼" in t:
             return "秘制烤鱼可选微辣/中辣/特辣，跟服务员说一声就行~"
         if "辣" in t:
-            _is_recommend_q = any(w in t for w in ["推荐","想吃","有什么","来点","吃什么","辣的","辣一点","辣味"])
-            if not _is_recommend_q:
+            _is_order_or_recommend = any(w in t for w in ["推荐","想吃","有什么","来点","吃什么","辣的","辣一点","辣味","点","要","来一份"])
+            if not _is_order_or_recommend:
                 d = self.kb.find_dish(inp)
                 if d and d.customizable:
                     return f"{d.name}可以调辣度，跟服务员说就行~"
-        # "不要香菜" 单独出现才走快速路径；复合查询（有预算/人数）跳过
+                if d:
+                    return f"{d.name}的辣度建议跟服务员确认哦~"
+        # "不要香菜" 快速路径（单独忌口确认，非复合订单）
         if "不要" in inp and "香菜" in inp:
             has_budget_or_people = re.search(r"\d+\s*(?:元|块|个人|人)|预算", inp)
             if not has_budget_or_people:
@@ -485,17 +509,6 @@ class MenuQAAgent:
             # General question
             if ingredient == "香菜":
                 return "大部分菜默认不放香菜，有忌口的话下单时跟服务员说一声就行~"
-        # 点菜意图（"我要/来/点一份XX"）
-        order_m = re.search(r"[我要来点来搞]\s*[一份个]?\s*(.+)", inp)
-        if order_m:
-            dish_name = order_m.group(1).strip().rstrip("，。！?")
-            d = self.kb.find_dish(dish_name)
-            if d:
-                state.last_dishes = [d.name]
-                allergy_warn = ""
-                if d.allergens:
-                    allergy_warn = f"\n⚠️ 提醒：含过敏原（{'、'.join(d.allergens)}）"
-                return f"好的！**{d.name}** {d.price}元 已记下~{allergy_warn}\n有忌口或过敏吗？要不要清淡/不辣？"
         # 常见主食/配料（不在菜品列表但顾客常问）
         _STAPLES = {
             "米饭": "米饭免费续碗！点菜自动送~",

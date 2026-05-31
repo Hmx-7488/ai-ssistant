@@ -51,8 +51,8 @@ def main():
             return
     
     print("\n[INFO] 正在启动饭小二...")
-    print("[INFO] 服务启动后访问: http://localhost:8000")
-    print("[INFO] API 文档: http://localhost:8000/docs")
+    print("[INFO] 服务启动后访问: http://localhost:8085")
+    print("[INFO] API 文档: http://localhost:8085/docs")
     print("[INFO] 按 Ctrl+C 停止服务\n")
     
     # 启动 FastAPI 服务
@@ -62,7 +62,7 @@ def main():
             "src.api.main:app",
             "--reload",
             "--host", "0.0.0.0",
-            "--port", "8000"
+            "--port", "8085"
         ], check=True)
     except KeyboardInterrupt:
         print("\n[INFO] 饭小二已停止服务，下次再见！")

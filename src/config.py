@@ -20,7 +20,7 @@ SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "./src/data/sample.db")
 
 # API 配置
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", "8084"))
+API_PORT = int(os.getenv("API_PORT", "8085"))
 
 # RAG 配置
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
