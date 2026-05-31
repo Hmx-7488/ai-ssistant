@@ -1,14 +1,16 @@
 # 🍚 饭小二 - 餐饮AI客服助手
 
-基于 **LangChain + LangGraph + RAG** 的餐厅智能客服系统，人称"美食界相声演员"。
+基于 **LangChain + LangGraph + RAG + Function Calling** 的餐厅智能客服系统，人称"美食界相声演员"。
 
 ## ✨ 功能特点
 
-- **LangGraph 多Agent**：6 个专用 Agent 各司其职，状态图编排路由
-- **RAG 增强**：向量检索 + LLM 生成，知识库自动构建
-- **三层架构**：确定性查询 → 结构化推荐 → LLM+RAG 兜底，高频问题秒回
-- **多轮对话**：上下文继承，"换个清淡的""还有别的吗""改成3个人"都能接住
+- **真正多Agent架构**：ToolAgent + Function Calling，LLM 自主决策调用工具（9个专用工具函数）
+- **LangGraph 编排**：8 个节点状态图路由，关键词规则优先 + LLM 兜底
+- **RAG 增强**：ChromaDB 向量检索 + 结构化知识库混合检索
+- **三层架构**：确定性查询 → 结构化推荐 → LLM+Tool Calling 兜底
+- **多轮对话**：上下文继承 + 对话记忆（最近10轮），"换个清淡的""改成3个人"都能接住
 - **约束识别**：人数、预算、人群、过敏原、口味偏好、场景
+- **FAQ 引擎**：50+ 结构化问答，加权关键词匹配，100% 确定性
 - **单一事实源**：`menu.json` 统一数据，一处修改全局生效
 
 ## 🚀 快速开始
@@ -70,8 +72,8 @@ uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8084
 ### 5. 测试
 
 ```bash
-# 运行 12 项验收测试
-python tests/test_rag.py
+# 运行 40 项验收测试（需要先启动后端）
+python preflight.py
 
 # CLI 交互式聊天（终端直接对话）
 python cli_chat.py
@@ -103,24 +105,33 @@ curl -X POST http://localhost:8084/chat \
 ai-assistant/
 ├── src/
 │   ├── agents/
-│   │   ├── router_agent.py         # 意图识别（关键词规则 + 可选 LLM）
-│   │   └── customer_service.py     # LangGraph 多Agent 入口
-│   │       ├── MenuQAAgent         #   菜品问答（价格/菜单/详情）
-│   │       ├── RecommendAgent      #   推荐（人群/过敏/预算/场景）
+│   │   ├── router_agent.py         # 意图识别（关键词规则 + LLM 兜底）
+│   │   └── customer_service.py     # LangGraph 多Agent 入口 + ToolAgent
+│   │       ├── ToolAgent           #   LLM + Function Calling 基类
+│   │       ├── MenuToolAgent       #   菜品问答工具Agent（9个工具）
+│   │       ├── RecommendToolAgent  #   推荐工具Agent
+│   │       ├── BookingToolAgent    #   订座工具Agent
+│   │       ├── ComplaintToolAgent  #   投诉工具Agent
+│   │       ├── MenuQAAgent         #   菜品问答（快速路径 + ToolAgent兜底）
+│   │       ├── RecommendAgent      #   推荐（预算/过敏/人群 + ToolAgent兜底）
 │   │       ├── ReservationAgent    #   订座
 │   │       ├── ComplaintAgent      #   投诉
-│   │       └── OrderAgent          #   订单
+│   │       └── HumanTransferAgent  #   转人工
 │   ├── tools/
+│   │   ├── agent_tools.py          # 9个 LangChain @tool 函数（Function Calling）
 │   │   ├── unified_kb.py           # 统一知识库（单一事实源）
-│   │   ├── vector_store.py         # 向量数据库 + RAG 检索
+│   │   ├── faq_engine.py           # FAQ 引擎（50+ 结构化问答）
+│   │   ├── vector_store.py         # ChromaDB 向量数据库 + RAG 检索
 │   │   └── document_loader.py      # 文档加载器
 │   ├── data/knowledge_base/
 │   │   ├── menu.json               # 菜品数据（唯一事实源）
-│   │   └── restaurant_faq.md       # 餐厅FAQ
+│   │   ├── restaurant_faq.json     # 结构化FAQ知识库
+│   │   └── restaurant_faq.md       # 餐厅FAQ文档
 │   ├── frontend/index.html         # 前端聊天页面
 │   ├── api/main.py                 # FastAPI 后端入口
 │   └── config.py                   # 配置
-├── tests/test_rag.py               # 12 项验收测试
+├── tests/test_rag.py               # 验收测试
+├── preflight.py                    # 40 项演示前检查
 ├── cli_chat.py                     # CLI 交互式聊天
 ├── start.py                        # 一键启动脚本
 ├── requirements.txt
@@ -137,31 +148,57 @@ ai-assistant/
 用户输入
   │
   ▼
-RouterAgent（意图分类 + 多轮承接检测）
+RouterAgent（关键词规则优先 → LLM兜底分类）
+  │  ├─ 菜品名称优先匹配
+  │  ├─ 菜系关键词匹配
+  │  └─ 意图优先级循环（转人工 > 投诉 > 订单 > 推荐 > 订座 > 点餐 > 闲聊）
   │
   ▼
-LangGraph StateGraph 路由
+LangGraph StateGraph 路由（8个节点）
   ├─ MenuQAAgent      ← 价格查询 / 点餐咨询
-  │    └─ 确定性快速路径 + RAG 兜底
+  │    ├─ FAQ引擎（50+ 结构化问答）
+  │    ├─ 确定性快速路径（50+ 条规则）
+  │    └─ ToolAgent（LLM + Function Calling 兜底）
   ├─ RecommendAgent   ← 菜品推荐
-  │    └─ 人群/过敏/预算/场景/口味 + 多轮承接
+  │    ├─ 预算算法 + 过敏原过滤 + 人群标签
+  │    ├─ 多轮承接（换一个/还有/改成）
+  │    └─ ToolAgent 兜底
   ├─ ReservationAgent ← 订座服务
-  ├─ ComplaintAgent   ← 投诉建议
+  ├─ ComplaintAgent   ← 投诉建议（8类快速响应）
+  ├─ HumanTransferAgent ← 转人工（400-888-6666）
   ├─ OrderAgent       ← 订单查询
-  └─ LLM + RAG 兜底   ← 闲聊 / 无法归类
+  └─ Fallback         ← FAQ + RAG + LLM 兜底
 ```
 
 ### 三层处理
 
 ```
-第一层：确定性查询（秒回，不调用 LLM）
-  菜单 / 价格 / 营业时间 / 地址 / WiFi / 优惠
+第一层：确定性查询（不调用 LLM）
+  菜单 / 价格 / 营业时间 / 地址 / WiFi / 优惠 / FAQ
 
-第二层：结构化推荐（秒回，不调用 LLM）
-  人群 / 过敏原 / 预算套餐 / 场景 / 口味
+第二层：结构化推荐（不调用 LLM）
+  人群 / 过敏原 / 预算套餐 / 场景 / 口味 / 多轮承接
 
-第三层：LLM + RAG 兜底
-  复杂问题 / 闲聊 / 菜系外询问
+第三层：LLM + Function Calling 兜底
+  复杂问题 / 工具调用 / 闲聊 / 菜系外询问
+```
+
+### ToolAgent 工具调用（Function Calling）
+
+```
+ToolAgent 基类
+  │  LLM.bind_tools() → 自主决定调用哪些工具
+  │  循环：LLM推理 → 选择工具 → 执行 → 喂回结果 → 重复（最多5轮）
+  │
+  ├─ query_dish         查菜品详情
+  ├─ search_dishes      按条件搜索菜品
+  ├─ get_full_menu      获取完整菜单
+  ├─ check_allergen     检查过敏原
+  ├─ recommend_combo    预算套餐推荐
+  ├─ recommend_for_people 人群推荐
+  ├─ query_faq          FAQ查询
+  ├─ get_promotions     优惠活动
+  └─ get_restaurant_info 餐厅信息
 ```
 
 ### 多轮对话
@@ -189,7 +226,8 @@ LangGraph StateGraph 路由
 | 订座服务 | ReservationAgent | 我想订座，有包间吗？ |
 | 投诉建议 | ComplaintAgent | 菜太咸了，服务态度差 |
 | 订单查询 | OrderAgent | 我的菜好了吗？ |
-| 闲聊互动 | LLM+RAG 兜底 | 你好，今天心情不好 |
+| 转人工 | HumanTransferAgent | 转人工、找真人客服 |
+| 闲聊互动 | Fallback（FAQ+RAG+LLM） | 你好，今天心情不好 |
 
 ## 🔧 API 接口
 
@@ -216,15 +254,18 @@ LangGraph StateGraph 路由
 ## 📝 开发进度
 
 - [x] 结构化知识库（menu.json 单一事实源）
-- [x] 意图识别（关键词规则 + 可选 LLM）
-- [x] 三层处理架构
-- [x] **LangGraph 多Agent 编排**
-- [x] **RAG 向量检索增强**
-- [x] 多轮对话状态管理
+- [x] 意图识别（关键词规则优先 + LLM 兜底）
+- [x] 三层处理架构（确定性 → 结构化 → LLM+Tool Calling）
+- [x] **LangGraph 多Agent 编排**（8节点状态图）
+- [x] **ToolAgent + Function Calling**（9个工具函数，LLM自主决策）
+- [x] **RAG 向量检索增强**（ChromaDB + text-embedding-v3）
+- [x] **FAQ 引擎**（50+ 结构化问答，加权关键词匹配）
+- [x] 多轮对话状态管理 + 对话记忆（最近10轮）
 - [x] 约束识别（人群/过敏/预算/场景/口味）
+- [x] 转人工功能（400-888-6666）
 - [x] 前端聊天界面
 - [x] CLI 交互式聊天
-- [x] 12 项验收测试 100% 通过
+- [x] **40 项验收测试 100% 通过**
 - [ ] 语音点餐支持
 - [ ] 会员个性化推荐
 - [ ] 数据分析看板

@@ -7,203 +7,262 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         用户层                               │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
-│  │   Web UI    │  │   API 调用  │  │   微信/钉钉 │         │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘         │
-└─────────┼───────────────┼───────────────┼───────────────────┘
-          │               │               │
-          ▼               ▼               ▼
+│  ┌─────────────┐  ┌─────────────┐                          │
+│  │   Web UI    │  │   CLI 聊天  │                          │
+│  └──────┬──────┘  └──────┬──────┘                          │
+└─────────┼───────────────┼──────────────────────────────────┘
+          │               │
+          ▼               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                       API 层（FastAPI）                      │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  POST /chat                                         │   │
-│  │  - 接收用户消息                                       │   │
-│  │  - 返回 Agent 回复                                   │   │
-│  │  - 管理会话状态                                       │   │
-│  └─────────────────────────────────────────────────────┘   │
+│                    API 层（FastAPI :8084）                    │
+│  POST /chat  |  GET /health  |  GET /（前端）               │
 └─────────────────────────┬───────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      Agent 层（LangGraph）                   │
+│              Agent 层（LangGraph StateGraph）                │
 │                                                             │
 │  ┌──────────────────────────────────────────────────────┐  │
-│  │                 Router Agent                          │  │
-│  │  职责：判断问题类型，分发给对应 Agent                   │  │
-│  │  分类：知识库问题 / 订单问题 / 闲聊 / 转人工           │  │
+│  │            RouterAgent（意图识别）                     │  │
+│  │  关键词规则优先 → LLM兜底分类（懒加载）               │  │
 │  └───────────────────────┬──────────────────────────────┘  │
 │                          │                                  │
-│           ┌──────────────┼──────────────┐                  │
-│           ▼              ▼              ▼                  │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐      │
-│  │  RAG Agent   │ │  SQL Agent   │ │  Chat Agent  │      │
-│  │              │ │              │ │              │      │
-│  │ 知识库问答   │ │ 订单查询     │ │ 闲聊/问候    │      │
-│  │ 检索文档回答 │ │ 自然语言转SQL│ │ 直接回复     │      │
-│  └──────┬───────┘ └──────┬───────┘ └──────────────┘      │
-│         │                │                                 │
-└─────────┼────────────────┼─────────────────────────────────┘
-          │                │
-          ▼                ▼
-┌─────────────────┐ ┌─────────────────┐
-│   ChromaDB      │ │   SQLite        │
-│   向量数据库     │ │   关系数据库     │
-│   存储文档Embedding│ │  存储订单数据   │
-└─────────────────┘ └─────────────────┘
+│  ┌──────────┬──────────┬──────────┬──────────┬──────────┐  │
+│  ▼          ▼          ▼          ▼          ▼          ▼  │
+│ MenuQA   Recommend  Reservation  Complaint  Human    Fallback│
+│ Agent     Agent      Agent       Agent     Transfer   Node  │
+│                                                             │
+│  每个Agent: 确定性快速路径 → ToolAgent(LLM+Tools)兜底      │
+└─────────┬───────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    ToolAgent 工具层                          │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  9个 @tool 函数（LangChain Function Calling）        │   │
+│  │  query_dish | search_dishes | get_full_menu          │   │
+│  │  check_allergen | recommend_combo | recommend_for_people │
+│  │  query_faq | get_promotions | get_restaurant_info    │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────┬───────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    数据层                                    │
+│  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐    │
+│  │  menu.json    │ │ restaurant_   │ │  ChromaDB     │    │
+│  │  菜品数据     │ │ faq.json      │ │  向量数据库    │    │
+│  │  (单一事实源)  │ │ FAQ知识库     │ │  RAG检索      │    │
+│  └───────────────┘ └───────────────┘ └───────────────┘    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 📦 模块设计
 
-### 1. Router Agent（路由 Agent）
+### 1. RouterAgent（意图识别）
 
-```python
-# 职责：判断用户问题类型
-# 输入：用户消息
-# 输出：问题类别 + 分发给对应 Agent
+```
+职责：判断用户问题类型，分发给对应Agent
+输入：用户消息
+输出：意图类别
 
-问题分类：
-  - knowledge_base: 知识库相关问题（产品功能、使用方法）
-  - order_query: 订单相关问题（查订单、查物流）
-  - chitchat: 闲聊（问候、感谢）
-  - human_handoff: 需要人工处理（投诉、复杂问题）
+8个意图：价格查询 | 菜品推荐 | 点餐咨询 | 订座服务 | 投诉建议 | 订单查询 | 转人工 | 闲聊互动
+
+分类策略（优先级从高到低）：
+  1. 菜系关键词（江西菜/川菜等）→ 点餐咨询
+  2. 菜品名称优先（红烧肉/烤鱼等）→ 点餐咨询（价格词除外）
+  3. 价格关键词 → 价格查询
+  4. 意图优先级循环：转人工 > 投诉 > 订单 > 推荐 > 订座 > 点餐 > 闲聊
+  5. LLM兜底（懒加载，规则未命中时自动调用）
 ```
 
-### 2. RAG Agent（知识库问答 Agent）
+### 2. ToolAgent（LLM + Function Calling 基类）
 
 ```python
-# 职责：基于知识库文档回答问题
-# 流程：
-#   1. 接收用户问题
-#   2. 将问题转为向量
-#   3. 在 ChromaDB 中检索相似文档
-#   4. 将检索结果 + 问题发给 LLM
-#   5. LLM 生成回答
+class ToolAgent:
+    """LLM + bind_tools() + 工具调用循环"""
+    # LLM.bind_tools() 绑定工具列表
+    # invoke() 循环：LLM推理 → 判断tool_calls → 执行工具 → 喂回结果 → 重复
+    # 最多5轮工具调用，最终返回文本回复
 
-关键技术：
-  - 文档分割：RecursiveCharacterTextSplitter
-  - 向量化：OpenAI Embedding / 本地模型
-  - 检索策略：相似度检索 + MMR
+4个专用ToolAgent：
+  - MenuToolAgent: MENU_TOOLS + BOOKING_TOOLS
+  - RecommendToolAgent: RECOMMEND_TOOLS + MENU_TOOLS
+  - BookingToolAgent: BOOKING_TOOLS
+  - ComplaintToolAgent: COMPLAINT_TOOLS
 ```
 
-### 3. SQL Agent（订单查询 Agent）
+### 3. 9个工具函数（agent_tools.py）
+
+```
+query_dish(dish_name)           查菜品详情
+search_dishes(category,tag,..)  按条件搜索菜品
+get_full_menu()                 获取完整菜单
+check_allergen(dish,allergen)   检查过敏原
+recommend_combo(people,budget)  预算套餐推荐
+recommend_for_people(type)      人群推荐
+query_faq(question)             FAQ查询
+get_promotions()                优惠活动
+get_restaurant_info(type)       餐厅信息
+```
+
+### 4. FAQ引擎（faq_engine.py）
+
+```
+50+ 结构化问答，7个分类
+匹配策略：菜品食材检查 → 加权关键词匹配（长词权重更高）
+上下文排除：防止"热菜"匹配空调FAQ
+100%确定性，不调用LLM
+```
+
+### 5. ConversationState（多轮对话状态）
 
 ```python
-# 职责：用自然语言查询订单数据库
-# 流程：
-#   1. 接收用户问题
-#   2. Agent 分析数据库结构
-#   3. 生成 SQL 查询
-#   4. 执行 SQL
-#   5. 将结果转为自然语言回答
-
-关键技术：
-  - SQLDatabase：封装数据库连接
-  - create_sql_agent：创建 SQL Agent
-  - 安全限制：只允许 SELECT 查询
+class ConversationState:
+    people: int          # 人数
+    budget: int          # 预算
+    people_type: str     # 人群类型（儿童/老人/孕妇/健身）
+    taste: str           # 口味偏好（辣/不辣/清淡）
+    allergies: list      # 过敏原/忌口
+    scene: str           # 场景（一人食/约会/聚餐）
+    last_dishes: list    # 上轮推荐的菜品
+    last_reply: str      # 上轮回复
+    message_history: list # 最近10轮对话 [(user, ai), ...]
 ```
 
 ---
 
 ## 🔑 核心代码结构
 
-### 主 Agent（整合所有子 Agent）
+### ToolAgent 基类（Function Calling）
 
 ```python
-from langchain.agents import create_agent
-from langchain_core.tools import tool
+class ToolAgent:
+    def __init__(self, llm, system_prompt: str, tools: list):
+        self.tools_by_name = {t.name: t for t in tools}
+        self.llm_with_tools = llm.bind_tools(tools)
 
-# 定义工具
-@tool
-def ask_knowledge_base(question: str) -> str:
-    """查询知识库，回答产品相关问题"""
-    return rag_agent.invoke(question)
+    def invoke(self, user_input: str, context: str = "", history: list = None) -> str:
+        messages = [SystemMessage(content=self.system_prompt)]
+        # 注入对话历史（最近3轮）
+        if history:
+            for user_msg, ai_msg in history[-3:]:
+                messages.append(HumanMessage(content=user_msg))
+                messages.append(AIMessage(content=ai_msg))
+        messages.append(HumanMessage(content=user_input))
 
-@tool
-def query_order(query: str) -> str:
-    """查询订单、物流等信息"""
-    return sql_agent.invoke(query)
-
-# 创建主 Agent
-customer_service_agent = create_agent(
-    model="openai:qwen-plus",
-    tools=[ask_knowledge_base, query_order],
-    system_prompt=CUSTOMER_SERVICE_PROMPT,
-)
+        for _ in range(5):  # 最多5轮工具调用
+            ai_msg = self.llm_with_tools.invoke(messages)
+            messages.append(ai_msg)
+            if not ai_msg.tool_calls:
+                return ai_msg.content or ""
+            for tc in ai_msg.tool_calls:
+                result = self.tools_by_name[tc["name"]].invoke(tc["args"])
+                messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+        return self.llm_with_tools.invoke(messages).content or ""
 ```
 
-### FastAPI 接口
+### 工具函数示例
 
 ```python
-from fastapi import FastAPI
-from pydantic import BaseModel
+from langchain_core.tools import tool
 
-app = FastAPI()
+@tool
+def query_dish(dish_name: str) -> str:
+    """Query details of a specific dish by name."""
+    kb = get_unified_kb()
+    dish = kb.find_dish(dish_name)
+    if not dish:
+        return f'未找到菜品 "{dish_name}"'
+    return kb.format_dish_info(dish)
 
-class ChatRequest(BaseModel):
-    message: str
-    session_id: str
+@tool
+def recommend_combo(people: int = 3, budget: int = 0,
+                    avoid_allergens: str = "", taste: str = "") -> str:
+    """Recommend a combo of dishes for a group."""
+    # 预算算法：套餐检查 → 分类搭配（主菜→配菜→汤→饮品）
+    # 过敏原过滤 + 口味筛选
+    ...
+```
 
-class ChatResponse(BaseModel):
-    reply: str
-    agent_used: str
+### LangGraph 状态图
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    result = await customer_service_agent.ainvoke({
-        "messages": [("user", request.message)]
-    })
-    return ChatResponse(
-        reply=result["messages"][-1].content,
-        agent_used="router"
-    )
+```python
+from langgraph.graph import StateGraph, END
+
+graph = StateGraph(GraphState)
+graph.add_node("router", router_node)
+graph.add_node("menu", menu_node)
+graph.add_node("recommend", recommend_node)
+graph.add_node("reservation", reservation_node)
+graph.add_node("complaint", complaint_node)
+graph.add_node("human", human_node)
+graph.add_node("fallback", fallback_node)
+
+graph.set_entry_point("router")
+graph.add_conditional_edges("router", route_intent, {...})
+for node in ["menu", "recommend", ...]:
+    graph.add_edge(node, END)
 ```
 
 ---
 
-## 📊 数据库设计
+## 📊 数据设计
 
-### 订单表（orders）
+### 菜品数据（menu.json - 单一事实源）
 
-```sql
-CREATE TABLE orders (
-    order_id TEXT PRIMARY KEY,
-    user_id TEXT,
-    product_name TEXT,
-    quantity INTEGER,
-    total_price REAL,
-    status TEXT,  -- pending/shipped/delivered
-    created_at TIMESTAMP,
-    shipped_at TIMESTAMP,
-    delivered_at TIMESTAMP
-);
+```json
+{
+  "菜品": [
+    {
+      "id": 1,
+      "name": "招牌红烧肉",
+      "price": 58,
+      "category": "热菜",
+      "description": "精选五花肉慢炖3小时，入口即化",
+      "spice": "不辣",
+      "portion": "适合2-3人",
+      "tags": ["招牌", "人气必点", "下饭", "肉食"],
+      "allergens": [],
+      "customizable": true,
+      "cook_time": "15分钟"
+    }
+  ],
+  "套餐": [...],
+  "人群标签": {...},
+  "场景推荐": {...},
+  "优惠活动": {...},
+  "餐厅信息": {...}
+}
 ```
 
-### 用户表（users）
+### FAQ数据（restaurant_faq.json）
 
-```sql
-CREATE TABLE users (
-    user_id TEXT PRIMARY KEY,
-    name TEXT,
-    phone TEXT,
-    email TEXT,
-    address TEXT
-);
+```json
+{
+  "营业信息": {
+    "营业时间": {
+      "keywords": ["营业", "几点", "开门", "关门"],
+      "answer": "午餐 11:00-14:00  晚餐 17:00-22:00"
+    }
+  },
+  "服务设施": {...},
+  "优惠活动": {...}
+}
 ```
 
-### 物流表（logistics）
+### 会话状态（内存）
 
-```sql
-CREATE TABLE logistics (
-    logistics_id TEXT PRIMARY KEY,
-    order_id TEXT,
-    carrier TEXT,
-    tracking_number TEXT,
-    status TEXT,
-    updated_at TIMESTAMP,
-    FOREIGN KEY (order_id) REFERENCES orders(order_id)
-);
+```python
+# ConversationState - 每个session_id独立
+sessions = {
+    "user_123": ConversationState(
+        people=3, budget=150, allergies=["不吃香菜"],
+        message_history=[("推荐菜", "推荐红烧肉..."), ("换一个", "清炒时蔬...")]
+    )
+}
 ```
 
 ---
