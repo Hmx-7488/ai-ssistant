@@ -183,15 +183,29 @@ class ConversationState:
         self.last_reply = ""
         self.last_intent = ""
         self.message_history = []  # [(user_msg, ai_reply), ...]
+        # 订座槽位
+        self.res_date = ""
+        self.res_time = ""
+        self.res_phone = ""
+        self.res_room = False
+        self.res_name = ""
 
     def reset_constraints(self):
-        """重置推荐约束（保留对话历史 last_dishes/last_reply）。"""
+        """重置推荐约束（保留对话历史 last_dishes/last_reply 和订座槽位）。"""
         self.people = 0
         self.budget = 0
         self.people_type = ""
         self.taste = ""
         self.allergies = []
         self.scene = ""
+
+    def reset_reservation(self):
+        """重置订座槽位。"""
+        self.res_date = ""
+        self.res_time = ""
+        self.res_phone = ""
+        self.res_room = False
+        self.res_name = ""
 
     def update_from(self, text: str):
         """从用户文本提取约束条件。"""
@@ -256,7 +270,55 @@ class ConversationState:
             if kw in text and f"不吃{val}" not in self.allergies:
                 if "不要" in text or "不吃" in text or "去" in text:
                     self.allergies.append(f"不吃{val}")
+        # 订座信息提取
+        self._extract_reservation(text)
         self.last_intent = ""
+
+    _CN_NUM = {"一":1,"二":2,"两":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10,"十一":11,"十二":12}
+
+    def _extract_reservation(self, text: str):
+        """从文本中提取订座信息（日期/时间/电话/包间/姓名）。"""
+        # 日期（具体日期覆盖模糊日期如"明天"）
+        m = re.search(r"(\d{1,2}[月\.]\d{1,2}[日号]?)", text)
+        if m:
+            self.res_date = m.group(1)
+        elif not self.res_date:
+            if "明天" in text: self.res_date = "明天"
+            elif "后天" in text: self.res_date = "后天"
+            elif "今天" in text: self.res_date = "今天"
+            elif "大后天" in text: self.res_date = "大后天"
+            else:
+                m = re.search(r"(周[一二三四五六日天]|星期[一二三四五六天])", text)
+                if m: self.res_date = m.group(1)
+        # 时间（支持中文数字：下午五点、晚上七点半）
+        if not self.res_time:
+            m = re.search(r"(\d{1,2}[:\.：]\d{2})", text)
+            if m:
+                self.res_time = m.group(1)
+            else:
+                # 匹配 "下午5点" / "下午五点" / "晚上7点半" / "上午10点"
+                m = re.search(r"([上下]午\s*[一二两三四五六七八九十\d]+\s*[点时]\s*[半]?\d{0,2}?)", text)
+                if m:
+                    self.res_time = m.group(1).replace(" ", "")
+                else:
+                    # 纯数字点："5点" / "五点"
+                    m = re.search(r"([一二两三四五六七八九十\d]+\s*[点时]\s*[半]?)", text)
+                    if m:
+                        self.res_time = m.group(1).replace(" ", "")
+        # 电话
+        if not self.res_phone:
+            m = re.search(r"(1[3-9]\d{9})", text)
+            if m: self.res_phone = m.group(1)
+        # 包间
+        if "包间" in text or "包厢" in text:
+            self.res_room = True
+        # 姓名
+        if not self.res_name:
+            m = re.search(r"我姓(\w)", text)
+            if m: self.res_name = m.group(1) + "先生/女士"
+            else:
+                m = re.search(r"姓(\w)", text)
+                if m: self.res_name = m.group(1) + "先生/女士"
 
     def is_follow_up(self, text: str) -> bool:
         """
@@ -787,23 +849,51 @@ class RecommendAgent:
 
 
 class ReservationAgent:
-    """订座 Agent。"""
+    """订座 Agent — 槽位填充模式。"""
     def __init__(self, llm):
         self.tool_agent = BookingToolAgent(llm)
-        self.chain = ChatPromptTemplate.from_messages([
-            ("system", "你是饭小二订座助手。引导用户确认日期、人数、是否包间、电话。"),
-            ("human", "{input}")
-        ]) | llm | StrOutputParser()
 
     def invoke(self, inp: str, state: ConversationState) -> str:
-        parts = []
-        if state.people > 0: parts.append(f"{state.people}人")
-        # 快速路径
-        if parts:
-            return f"好的，{','.join(parts)}！请告诉我具体日期时间和联系电话~"
-        if any(w in inp for w in ["包间", "包厢"]):
-            return self.tool_agent.invoke(inp, context=state.context_summary(), history=state.message_history)
-        return "请告诉我：日期时间、人数、是否需要包间、联系电话~"
+        # 从当前输入提取订座信息（router_node 已调用 update_from → _extract_reservation）
+        s = state
+        filled = []
+        missing = []
+        if s.people > 0: filled.append(f"{s.people}人")
+        else: missing.append("人数")
+        if s.res_date: filled.append(s.res_date)
+        else: missing.append("日期")
+        if s.res_time: filled.append(s.res_time)
+        else: missing.append("时间")
+        if s.res_phone: filled.append(f"电话{s.res_phone}")
+        else: missing.append("联系电话")
+        if s.res_room: filled.append("需要包间")
+        # 姓名可选，不强制要求
+
+        # 全部信息已确认 → 返回预订成功
+        if s.people > 0 and s.res_date and s.res_time and s.res_phone:
+            room_info = ""
+            if s.res_room:
+                if s.people <= 6:
+                    room_info = "小包间(4-6人)，低消300元"
+                else:
+                    room_info = "大包间(8-12人)，低消600元"
+                room_info = f"\n🏠 包间：{room_info}"
+            return (
+                f"预约确认！\n"
+                f"📅 {s.res_date} {s.res_time}\n"
+                f"👥 {s.people}人{room_info}\n"
+                f"📞 {s.res_phone}\n"
+                f"预约成功！如需取消请提前2小时联系我们~"
+            )
+
+        # 部分信息 → 问缺少的
+        if filled:
+            summary = "、".join(filled)
+            need = "、".join(missing)
+            return f"收到，{summary}！还需要：{need}~"
+
+        # 什么信息都没有 → 引导提供
+        return "请告诉我：📅日期、⏰时间、👥人数、📞联系电话、是否需要包间？"
 
 
 class ComplaintAgent:
@@ -909,6 +999,26 @@ class CustomerServiceAgent:
             is_follow = cs.is_follow_up(state["inp"])
             if is_follow and cs.last_dishes:
                 return {**state, "intent": "follow_recommend", "is_follow": True}
+            # 订座多轮：上一轮是订座，当前输入看起来像订座补充信息 → 保持上下文
+            _reservation_detail_kw = ["点", "分", "人", "电话", "包间", "包厢",
+                                       "月", "号", "日", "上午", "下午", "晚上",
+                                       "明天", "后天", "今天", "周", "星期"]
+            _topic_switch_kw = ["推荐", "菜单", "多少钱", "投诉", "转人工", "订单", "价格"]
+            _is_reservation_follow = (
+                cs.last_intent == "订座服务"
+                and not any(w in state["inp"] for w in _topic_switch_kw)
+                and not any(kw in state["inp"] for kw in RouterAgent._DISH_KEYWORDS)
+                and (
+                    any(kw in state["inp"] for kw in _reservation_detail_kw)
+                    or re.search(r"1[3-9]\d{9}", state["inp"])  # 电话号码
+                    or re.search(r"\d{1,2}[月\.]\d{1,2}", state["inp"])  # 日期
+                    or re.search(r"\d+\s*个人", state["inp"])  # X个人
+                )
+            )
+            if _is_reservation_follow:
+                cs.update_from(state["inp"])
+                cs.last_intent = "订座服务"
+                return {**state, "intent": "订座服务", "is_follow": False}
             # 新查询：重置约束再提取新约束
             cs.reset_constraints()
             cs.update_from(state["inp"])
