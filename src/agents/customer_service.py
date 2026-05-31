@@ -641,6 +641,17 @@ class OrderAgent:
         return "您的菜品正在厨房精心制作中，稍等片刻美味就到！着急的话我帮您催一下~"
 
 
+class HumanTransferAgent:
+    """转人工 Agent：用户要求转接人工客服时触发。"""
+    def invoke(self, inp: str, state: ConversationState) -> str:
+        return (
+            "好的，正在为您转接人工客服，请稍等~\n"
+            "📞 也可直接拨打：400-888-6666\n"
+            "⏰ 人工客服工作时间：9:00-22:00\n"
+            "饭小二会一直在这，随时叫我回来也行哦~"
+        )
+
+
 class CustomerServiceAgent:
     """
     LangGraph 多Agent编排的客服入口。
@@ -667,6 +678,7 @@ class CustomerServiceAgent:
         self.res_agent     = ReservationAgent(self.llm)
         self.comp_agent    = ComplaintAgent(self.llm)
         self.order_agent   = OrderAgent()
+        self.human_agent   = HumanTransferAgent()
 
         # RAG 兜底链（闲聊 / 无法归类时使用）
         self.rag_chain = ChatPromptTemplate.from_messages([
@@ -723,6 +735,10 @@ class CustomerServiceAgent:
             reply = self.order_agent.invoke(state["inp"], state["state_obj"])
             return {**state, "reply": reply}
 
+        def human_node(state: GraphState) -> GraphState:
+            reply = self.human_agent.invoke(state["inp"], state["state_obj"])
+            return {**state, "reply": reply}
+
         def fallback_node(state: GraphState) -> GraphState:
             # 快速路径：常见问候/告别不走LLM
             fast = {
@@ -759,6 +775,7 @@ class CustomerServiceAgent:
             if intent == "订座服务":   return "reservation"
             if intent == "投诉建议":   return "complaint"
             if intent == "订单查询":   return "order"
+            if intent == "转人工":    return "human"
             return "fallback"
 
         graph = StateGraph(GraphState)
@@ -769,6 +786,7 @@ class CustomerServiceAgent:
         graph.add_node("reservation", reservation_node)
         graph.add_node("complaint",   complaint_node)
         graph.add_node("order",       order_node)
+        graph.add_node("human",       human_node)
         graph.add_node("fallback",    fallback_node)
 
         graph.set_entry_point("router")
@@ -779,10 +797,11 @@ class CustomerServiceAgent:
             "reservation":  "reservation",
             "complaint":    "complaint",
             "order":        "order",
+            "human":        "human",
             "fallback":     "fallback",
         })
 
-        for node in ["menu", "recommend", "reservation", "complaint", "order", "fallback"]:
+        for node in ["menu", "recommend", "reservation", "complaint", "order", "human", "fallback"]:
             graph.add_edge(node, END)
 
         self.graph = graph.compile()
