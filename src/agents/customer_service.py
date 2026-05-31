@@ -27,8 +27,10 @@ class ConversationState:
     """Multi-turn conversation state to track user constraints."""
 
     # ── Follow-up 关键词 ──
-    FOLLOW_UP_KW = ["还有","换个","不要","刚才","改成","重新","再来",
+    FOLLOW_UP_KW = ["还有","换个","刚才","改成","重新","再来",
                      "其他的","别的","换一个","不要这个","换个清淡","再来一个"]
+    # "不要"后面跟食材/忌口词时，是饮食偏好而非 follow-up
+    _PREFERENCE_SUFFIX = ["香菜","葱","姜","蒜","辣","花椒","蒜蓉","洋葱","芹菜","香葱"]
 
     def __init__(self):
         self.people = 0
@@ -68,6 +70,10 @@ class ConversationState:
         # "推荐300的菜" / "吃200的" / "点150的"
         if not budget:
             m = re.search(r"(?:推荐|吃|点|来)\s*(\d{2,})\s*的", text)
+            if m: budget = int(m.group(1))
+        # "200怎么吃" / "200块吃什么" / "200够吗"
+        if not budget:
+            m = re.search(r"(\d{2,})\s*(?:怎么|够|咋)", text)
             if m: budget = int(m.group(1))
         if budget > 0: self.budget = budget
         for k in ["宝宝","小宝宝","婴儿","baby","儿童","小孩","孩子"]:
@@ -127,6 +133,10 @@ class ConversationState:
         if len(t) > 12:
             return False
         # 条件3a: 包含 follow-up 关键词
+        # 但 "不要香菜" 等忌口表达不算 follow-up
+        _is_preference = t.startswith("不要") and any(t.endswith(s) or f"不要{s}" in t for s in self._PREFERENCE_SUFFIX)
+        if _is_preference:
+            return False
         for kw in self.FOLLOW_UP_KW:
             if kw in t:
                 return True
@@ -213,17 +223,36 @@ class MenuQAAgent:
                 if ds:
                     lines = [f"**{d.name}** {d.price}元 - {d.description[:20]}" for d in ds]
                     return f"{label}有这些：\n" + "\n".join(lines)
-        # 辣度/定制查询
+        # 辣度查询：只在用户提到具体菜品时走快速路径，否则交给推荐Agent
         if "辣" in t and "烤鱼" in t:
             return "秘制烤鱼可选微辣/中辣/特辣，跟服务员说一声就行~"
-        if "辣" in t and not any(w in t for w in ["推荐","菜单","过敏","预算"]):
-            d = self.kb.find_dish(inp)
-            if d and d.customizable:
-                return f"{d.name}可以调辣度，跟服务员说就行~"
+        if "辣" in t:
+            _is_recommend_q = any(w in t for w in ["推荐","想吃","有什么","来点","吃什么","辣的","辣一点","辣味"])
+            if not _is_recommend_q:
+                d = self.kb.find_dish(inp)
+                if d and d.customizable:
+                    return f"{d.name}可以调辣度，跟服务员说就行~"
+        # "不要香菜" 单独出现才走快速路径；复合查询（有预算/人数）跳过
         if "不要" in inp and "香菜" in inp:
-            return "可以！下单时跟服务员说不要香菜，厨房会单独处理~"
-        # 食材成分提问（"XX有放YY吗"）
-        ingredient_q = re.search(r"有放(.+?)吗|放了(.+?)吗|有(.+?)吗", inp)
+            has_budget_or_people = re.search(r"\d+\s*(?:元|块|个人|人)|预算", inp)
+            if not has_budget_or_people:
+                return "可以！下单时跟服务员说不要香菜，厨房会单独处理~"
+        # 温度偏好（"有冰的吗" / "可以加热吗"）
+        if re.search(r"冰的|冰镇|加冰|常温|热的|加热|温的", inp):
+            d = self.kb.find_dish(inp)
+            name = d.name if d else ""
+            if "西瓜" in inp or "汁" in inp:
+                return f"{'西瓜汁' if not name else name}默认常温，可以加冰，跟服务员说一声就行~"
+            if "酸梅" in inp or "汤" in inp:
+                return f"{'酸梅汤' if not name else name}可以选冰的或常温，夏天推荐冰镇的！跟服务员说一声~"
+            return "饮品都可以选冰的或常温，跟服务员说一声就行~"
+        # 食材成分提问（"XX有放YY吗"）— 只匹配具体食材，排除"冰的/大份/小份"等
+        _non_ingredient = r"冰|热|大份|小份|多|少|辣|咸|甜|酸"
+        ingredient_q = re.search(r"有放(.+?)吗|放了(.+?)吗", inp)
+        if not ingredient_q:
+            m = re.search(r"有(.{1,4}?)吗", inp)
+            if m and not re.search(_non_ingredient, m.group(1)):
+                ingredient_q = m
         if ingredient_q:
             ingredient = (ingredient_q.group(1) or ingredient_q.group(2) or ingredient_q.group(3) or "").strip()
             d = self.kb.find_dish(inp)
@@ -326,11 +355,12 @@ class RecommendAgent:
         # 人群+预算/人数组合 → _for_people（内部处理预算）
         if state.people_type:
             return self._for_people(state)
-        if state.allergies:
-            return self._allergen_safe(state)
+        # 有预算时，预算优先（内部处理过敏原）
         if state.budget > 0:
             if state.people == 0: state.people = 3  # 默认3人
             return self._by_budget(state)
+        if state.allergies:
+            return self._allergen_safe(state)
         if state.scene:
             return self._by_scene(state)
         if state.taste == "辣":
@@ -435,8 +465,18 @@ class RecommendAgent:
 
     def _allergen_safe(self, state):
         safe = list(self.kb.dishes)
+        # "不吃X" 类的忌口：从菜品描述/标签中排除含该食材的菜品
+        _avoid_ingredients = {
+            "不吃香菜": ["香菜"], "不吃葱": ["葱"], "不吃姜": ["姜"],
+            "不吃蒜": ["蒜"], "不吃花椒": ["花椒"],
+        }
         for a in state.allergies:
-            if not a.startswith("不吃"):
+            if a in _avoid_ingredients:
+                # 排除 description 或 tags 中含有该食材的菜品
+                for ingredient in _avoid_ingredients[a]:
+                    safe = [d for d in safe if ingredient not in d.description and ingredient not in str(d.tags)]
+            else:
+                # 标准过敏原：直接排除 allergens 列表中含有的
                 safe = [d for d in safe if a not in d.allergens]
         recs = safe[:4] or self.kb.dishes[:3]
         lines = [f"**{d.name}** {d.price}元" for d in recs]
@@ -458,8 +498,16 @@ class RecommendAgent:
                 state.last_reply = reply
                 return reply
 
-        # 口味约束筛选候选菜品
+        # 口味+过敏原约束筛选候选菜品
         candidates = list(self.kb.dishes)
+        # 过敏原过滤
+        _avoid_map = {"不吃香菜":"香菜","不吃葱":"葱","不吃姜":"姜","不吃蒜":"蒜"}
+        for a in state.allergies:
+            if a in _avoid_map:
+                ingredient = _avoid_map[a]
+                candidates = [d for d in candidates if ingredient not in d.description and ingredient not in str(d.tags)]
+            else:
+                candidates = [d for d in candidates if a not in d.allergens]
         if state.taste == "清淡":
             # 严格只选有"清淡"标签的菜品
             candidates = [d for d in candidates if "清淡" in d.tags]

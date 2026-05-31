@@ -64,8 +64,10 @@ def match_faq(query: str) -> Optional[str]:
     q = query.lower().strip()
 
     # 1. 先检查菜品食材问题（"XX有放YY吗" / "YY有YY吗" / "XX里面有什么食材"）
+    # 排除温度/份量等非食材问题（"有冰的吗" 不是问食材）
+    _non_ingredient = ["冰", "热的", "常温", "大份", "小份", "打包", "外卖"]
     is_ingredient_q = any(w in q for w in ["放", "有", "食材", "里面", "什么", "成分", "配料"])
-    if is_ingredient_q:
+    if is_ingredient_q and not any(w in q for w in _non_ingredient):
         for dish_name, info in _DISH_INGREDIENTS.items():
             # 支持部分匹配：用户说"红烧肉"也能匹配"招牌红烧肉"
             short_name = dish_name.replace("招牌", "").replace("秘制", "").replace("手工", "").replace("鲜榨", "")
