@@ -69,24 +69,28 @@ class RouterAgent:
         """初始化 Router Agent"""
         self._safe_print("[RouterAgent] 初始化...")
         self.chain = None
+        self._llm_initialized = False
+        self._safe_print("[RouterAgent] 初始化完成（LLM路由将按需加载）")
 
-        if os.getenv("ENABLE_LLM_ROUTER", "0") == "1":
-            # 初始化 LLM（使用较低温度确保输出稳定）
-            self.llm = ChatOpenAI(
+    def _ensure_llm_chain(self):
+        """Lazy-init LLM chain on first use."""
+        if self._llm_initialized:
+            return
+        self._llm_initialized = True
+        try:
+            llm = ChatOpenAI(
                 model=os.getenv("CHAT_MODEL", "qwen-plus"),
                 temperature=0.1,
             )
-
-            # 创建 Prompt 模板
-            self.prompt = ChatPromptTemplate.from_messages([
+            prompt = ChatPromptTemplate.from_messages([
                 ("system", ROUTER_PROMPT),
                 ("human", "{input}"),
             ])
-
-            # 构建 Chain
-            self.chain = self.prompt | self.llm | StrOutputParser()
-
-        self._safe_print("[RouterAgent] 初始化完成")
+            self.chain = prompt | llm | StrOutputParser()
+            self._safe_print("[RouterAgent] LLM路由已加载")
+        except Exception as e:
+            self._safe_print(f"[RouterAgent] LLM路由加载失败: {e}")
+            self.chain = None
 
     def invoke(self, user_input: str) -> str:
         """
@@ -106,12 +110,17 @@ class RouterAgent:
             self._safe_print(f"[RouterAgent] 规则识别结果: {intent}")
             return intent
 
-        # 可选：调用 LLM 识别长尾意图。
+        # 规则未命中 → 用 LLM 识别长尾意图
+        self._ensure_llm_chain()
         if self.chain is None:
-            self._safe_print("[RouterAgent] 未命中规则，归类为闲聊互动")
+            self._safe_print("[RouterAgent] LLM不可用，归类为闲聊互动")
             return "闲聊互动"
 
-        intent = self.chain.invoke({"input": user_input}).strip()
+        try:
+            intent = self.chain.invoke({"input": user_input}).strip()
+        except Exception as e:
+            self._safe_print(f"[RouterAgent] LLM调用失败: {e}")
+            return "闲聊互动"
 
         # 验证意图是否在预定义类别中
         if intent not in self.INTENTS:
@@ -126,6 +135,11 @@ class RouterAgent:
         normalized = user_input.lower().strip()
         if not normalized:
             return "闲聊互动"
+
+        # 菜系查询（"有江西菜吗"、"有没有川菜"）→ 点餐咨询
+        _CUISINE_KW = ["江西菜", "川菜", "粤菜", "湘菜", "鲁菜", "日料", "韩餐", "西餐", "泰国菜"]
+        if any(kw in normalized for kw in _CUISINE_KW):
+            return "点餐咨询"
 
         # 0. 菜品名称优先 → 点餐咨询（"蛋炒饭是几个人吃的" → 点餐，不是订座）
         if any(kw in normalized for kw in self._DISH_KEYWORDS):

@@ -41,12 +41,27 @@ class ToolAgent:
         self.tools_by_name = {t.name: t for t in tools}
         self.llm_with_tools = llm.bind_tools(tools)
 
-    def invoke(self, user_input: str, context: str = "") -> str:
-        """Run the tool-calling loop and return a text response."""
+    def invoke(self, user_input: str, context: str = "", history: list = None) -> str:
+        """
+        Run the tool-calling loop and return a text response.
+
+        Args:
+            user_input: Current user message
+            context: Extra context string (e.g. RAG results)
+            history: List of (user_msg, assistant_msg) tuples for multi-turn
+        """
         sys_msg = self.system_prompt
         if context:
             sys_msg += f"\n\n当前上下文：{context}"
-        messages = [SystemMessage(content=sys_msg), HumanMessage(content=user_input)]
+        messages = [SystemMessage(content=sys_msg)]
+
+        # Inject conversation history
+        if history:
+            for user_msg, ai_msg in history[-3:]:  # last 3 turns max
+                messages.append(HumanMessage(content=user_msg))
+                messages.append(AIMessage(content=ai_msg))
+
+        messages.append(HumanMessage(content=user_input))
 
         for _ in range(5):  # max 5 tool-calling rounds
             ai_msg = self.llm_with_tools.invoke(messages)
@@ -167,6 +182,7 @@ class ConversationState:
         self.last_dishes = []
         self.last_reply = ""
         self.last_intent = ""
+        self.message_history = []  # [(user_msg, ai_reply), ...]
 
     def reset_constraints(self):
         """重置推荐约束（保留对话历史 last_dishes/last_reply）。"""
@@ -313,6 +329,10 @@ class MenuQAAgent:
             return faq_answer
 
         # ── 确定性快速路径（不调用 LLM） ──
+        # 菜系查询（我们没有的菜系）
+        for cuisine in ["江西", "川菜", "粤菜", "湘菜", "鲁菜", "苏菜", "浙菜", "闽菜", "徽菜", "日料", "韩餐", "西餐", "泰国菜", "印度菜"]:
+            if cuisine in t:
+                return f"我们是家常菜融合餐厅，暂时没有{cuisine}，但有红烧肉、烤鱼、水煮牛肉等招牌硬菜，要不要看看菜单？😋"
         if "菜单" in t or "所有菜" in t or "全部菜" in t:
             return self._format_menu()
         if "营业" in t or "几点" in t or "开门" in t:
@@ -431,7 +451,7 @@ class MenuQAAgent:
         # RAG 兜底 → ToolAgent（LLM + Function Calling）
         ctx = retrieve_context(inp, top_k=3)
         context = ctx if ctx else ""
-        return self.tool_agent.invoke(inp, context=context)
+        return self.tool_agent.invoke(inp, context=context, history=state.message_history)
 
     def _format_menu(self) -> str:
         cats = {}
@@ -528,7 +548,7 @@ class RecommendAgent:
         info = self.kb.recommend_for_people(state.people_type)
         if not info:
             ctx = retrieve_context(f"推荐{state.people_type}吃的菜")
-            return self.tool_agent.invoke(f"推荐{state.people_type}吃的菜", context=ctx or "")
+            return self.tool_agent.invoke(f"推荐{state.people_type}吃的菜", context=ctx or "", history=state.message_history)
         recs = info.get("推荐", [])
         note = info.get("说明", "")
 
@@ -697,7 +717,7 @@ class RecommendAgent:
             state.last_reply = reply
             return reply
         ctx = retrieve_context(f"{state.scene}场景推荐")
-        return self.tool_agent.invoke(f"{state.scene}推荐菜品", context=ctx or "")
+        return self.tool_agent.invoke(f"{state.scene}推荐菜品", context=ctx or "", history=state.message_history)
 
     def _spicy(self, state):
         dishes = [d for d in self.kb.dishes if "辣" in d.spice and "不辣" not in d.spice]
@@ -782,7 +802,7 @@ class ReservationAgent:
         if parts:
             return f"好的，{','.join(parts)}！请告诉我具体日期时间和联系电话~"
         if any(w in inp for w in ["包间", "包厢"]):
-            return self.tool_agent.invoke(inp, context=state.context_summary())
+            return self.tool_agent.invoke(inp, context=state.context_summary(), history=state.message_history)
         return "请告诉我：日期时间、人数、是否需要包间、联系电话~"
 
 
@@ -813,7 +833,7 @@ class ComplaintAgent:
             if keyword in t:
                 return reply
         # LLM 兜底 → ToolAgent（LLM + Function Calling）
-        return self.tool_agent.invoke(f"顾客说：{inp}", context=state.context_summary())
+        return self.tool_agent.invoke(f"顾客说：{inp}", context=state.context_summary(), history=state.message_history)
 
 
 class OrderAgent:
@@ -1003,4 +1023,8 @@ class CustomerServiceAgent:
         })
         reply = result.get("reply", "")
         cs.last_reply = reply
+        # Save to conversation history (keep last 10 turns)
+        cs.message_history.append((inp, reply))
+        if len(cs.message_history) > 10:
+            cs.message_history = cs.message_history[-10:]
         return reply
